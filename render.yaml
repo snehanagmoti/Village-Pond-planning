@@ -60,6 +60,9 @@ services:
         value: "Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
     routes:
       - type: rewrite
+        source: /
+        destination: /index.html
+      - type: rewrite
         source: /*
         destination: /index.html
     headers:
