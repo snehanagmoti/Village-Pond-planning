@@ -41,7 +41,6 @@ services:
   - type: web
     name: sneha-village-pond-planning-2026
     runtime: static
-    plan: free
     branch: main
     rootDir: frontend
     buildCommand: npm ci --ignore-scripts && npm run build
