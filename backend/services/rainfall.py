@@ -1,112 +1,114 @@
-"""
-Rainfall Service
-----------------
-Queries historical precipitation data from the Open-Meteo Archive API.
-Completely free — no API key required.
+"""Historical rainfall climatology with explicit model and coverage accounting."""
 
-Returns:
-    - Annual average rainfall (mm)
-    - Monthly breakdown (12-month averages for charts)
-"""
-
-import httpx
-from typing import Dict, List, Tuple
 import logging
+from collections import defaultdict
+from dataclasses import dataclass
+
+from config import get_settings
+from services.cache import TTLCache
+from services.http_client import get_with_retries
+from services.quality import SourceInfo, UpstreamDataError
 
 logger = logging.getLogger(__name__)
-
-ARCHIVE_API_URL = "https://archive-api.open-meteo.com/v1/archive"
-
 MONTH_NAMES = [
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December",
 ]
+settings = get_settings()
+_cache: TTLCache["RainfallResult"] = TTLCache(maxsize=128, ttl_seconds=settings.cache_ttl_seconds)
 
 
-async def get_rainfall_data(lat: float, lng: float) -> Dict:
-    """
-    Fetch historical rainfall data and compute annual + monthly averages.
+@dataclass
+class RainfallResult:
+    annual_avg_mm: float
+    valid_years: int
+    monthly: list[dict]
+    source: SourceInfo
 
-    Uses the Open-Meteo Archive API for the period 2013–2023 (11 years).
 
-    Parameters:
-        lat: Latitude of the location
-        lng: Longitude of the location
-
-    Returns:
-        Dict with:
-            - annual_avg_mm:  Average annual rainfall in mm
-            - monthly:        List of 12 dicts [{"month": "January", "rainfall_mm": 45.2}, ...]
-    """
-    url = (
-        f"{ARCHIVE_API_URL}"
-        f"?latitude={lat}&longitude={lng}"
-        f"&start_date=2013-01-01&end_date=2023-12-31"
-        f"&daily=precipitation_sum"
-        f"&timezone=auto"
+async def get_rainfall_data(lat: float, lng: float) -> RainfallResult:
+    cache_key = (
+        round(lat, 4), round(lng, 4), settings.rainfall_start_year,
+        settings.rainfall_end_year, settings.rainfall_model,
     )
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        cached.source.message = "; ".join(
+            filter(None, [cached.source.message, "served from in-process cache"])
+        )
+        return cached
 
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(url, timeout=30.0)
-            if response.status_code == 200:
-                data = response.json()
-                if "daily" in data and "precipitation_sum" in data["daily"]:
-                    dates = data["daily"].get("time", [])
-                    precip = data["daily"]["precipitation_sum"]
-
-                    # Compute monthly totals across all years
-                    monthly_totals = [0.0] * 12
-                    monthly_counts = [0] * 12
-
-                    for date_str, p in zip(dates, precip):
-                        if p is not None:
-                            month_idx = int(date_str[5:7]) - 1  # "YYYY-MM-DD" → month 0–11
-                            monthly_totals[month_idx] += p
-                            monthly_counts[month_idx] += 1
-
-                    # Compute monthly averages (total / number of years with data)
-                    num_years = 11.0
-                    monthly_avg = []
-                    for i in range(12):
-                        # Average rainfall per year for this month
-                        avg = monthly_totals[i] / num_years if num_years > 0 else 0.0
-                        monthly_avg.append({
-                            "month": MONTH_NAMES[i],
-                            "rainfall_mm": round(avg, 1),
-                        })
-
-                    annual_avg = sum(m["rainfall_mm"] for m in monthly_avg)
-
-                    logger.info("Rainfall data fetched: annual_avg=%.1f mm", annual_avg)
-
-                    return {
-                        "annual_avg_mm": round(annual_avg, 2),
-                        "monthly": monthly_avg,
-                    }
-
-            logger.warning("Rainfall API returned status %d", response.status_code)
-
-        except Exception as exc:
-            logger.error("Error fetching rainfall: %s", exc)
-
-    # Fallback: typical rural India ~800mm with a monsoon distribution
-    logger.warning("Using fallback rainfall data")
-    fallback_monthly = [
-        {"month": "January",   "rainfall_mm": 10.0},
-        {"month": "February",  "rainfall_mm": 12.0},
-        {"month": "March",     "rainfall_mm": 15.0},
-        {"month": "April",     "rainfall_mm": 25.0},
-        {"month": "May",       "rainfall_mm": 40.0},
-        {"month": "June",      "rainfall_mm": 150.0},
-        {"month": "July",      "rainfall_mm": 200.0},
-        {"month": "August",    "rainfall_mm": 180.0},
-        {"month": "September", "rainfall_mm": 120.0},
-        {"month": "October",   "rainfall_mm": 30.0},
-        {"month": "November",  "rainfall_mm": 10.0},
-        {"month": "December",  "rainfall_mm": 8.0},
-    ]
-    return {
-        "annual_avg_mm": 800.0,
-        "monthly": fallback_monthly,
+    params = {
+        "latitude": lat,
+        "longitude": lng,
+        "start_date": f"{settings.rainfall_start_year}-01-01",
+        "end_date": f"{settings.rainfall_end_year}-12-31",
+        "daily": "precipitation_sum",
+        "timezone": "auto",
+        "models": settings.rainfall_model,
+        **({"apikey": settings.open_meteo_api_key} if settings.open_meteo_api_key else {}),
     }
+    try:
+        response = await get_with_retries(settings.rainfall_api_url, params=params)
+    except Exception as exc:
+        raise UpstreamDataError("rainfall", f"Rainfall source was unavailable: {type(exc).__name__}") from exc
+    if response.status_code != 200:
+        raise UpstreamDataError("rainfall", f"Rainfall source returned HTTP {response.status_code}")
+    data = response.json().get("daily", {})
+    dates = data.get("time")
+    precipitation = data.get("precipitation_sum")
+    if not isinstance(dates, list) or not isinstance(precipitation, list) or len(dates) != len(precipitation):
+        raise UpstreamDataError("rainfall", "Rainfall source returned an invalid daily series")
+
+    totals: dict[int, list[float]] = defaultdict(lambda: [0.0] * 12)
+    counts: dict[int, list[int]] = defaultdict(lambda: [0] * 12)
+    for date_text, value in zip(dates, precipitation, strict=False):
+        if value is None:
+            continue
+        year = int(date_text[:4])
+        month = int(date_text[5:7]) - 1
+        totals[year][month] += max(0.0, float(value))
+        counts[year][month] += 1
+
+    valid_years: list[int] = []
+    for year in range(settings.rainfall_start_year, settings.rainfall_end_year + 1):
+        expected_days = 366 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 365
+        if sum(counts[year]) == expected_days:
+            valid_years.append(year)
+    if len(valid_years) < 3:
+        raise UpstreamDataError("rainfall", "Fewer than three sufficiently complete rainfall years were returned")
+
+    monthly: list[dict] = []
+    for month_index, month_name in enumerate(MONTH_NAMES):
+        month_values = [totals[year][month_index] for year in valid_years]
+        if not month_values:
+            continue
+        monthly.append({
+            "month": month_name,
+            "rainfall_mm": round(sum(month_values) / len(month_values), 1),
+            "valid_years": len(month_values),
+        })
+    if len(monthly) != 12:
+        raise UpstreamDataError("rainfall", "Rainfall coverage is incomplete for one or more months")
+
+    annual_values = [sum(totals[year]) for year in valid_years]
+    annual_avg = round(sum(annual_values) / len(annual_values), 2)
+    status = "reliable" if len(valid_years) >= settings.rainfall_min_valid_years else "degraded"
+    message = None if status == "reliable" else f"Only {len(valid_years)} complete years available"
+    source = SourceInfo(
+        name="Open-Meteo Historical Weather API",
+        status=status,
+        resolution=(
+            "0.1° (approximately 11 km)"
+            if settings.rainfall_model.casefold() == "era5_land"
+            else "model dependent; see source documentation"
+        ),
+        period=f"{settings.rainfall_start_year}-{settings.rainfall_end_year}",
+        model=settings.rainfall_model,
+        coverage_ratio=round(len(valid_years) / (settings.rainfall_end_year - settings.rainfall_start_year + 1), 4),
+        message=message,
+        license_url="https://open-meteo.com/en/terms",
+    )
+    result = RainfallResult(annual_avg, len(valid_years), monthly, source)
+    _cache.set(cache_key, result)
+    return result

@@ -1,383 +1,502 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, Polygon, Polyline, Tooltip, useMapEvents, useMap } from 'react-leaflet';
+import { useEffect, useRef, useState } from 'react';
+import {
+  MapContainer,
+  Marker,
+  Polygon,
+  Polyline,
+  Popup,
+  TileLayer,
+  Tooltip,
+  useMap,
+  useMapEvents,
+} from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
-import axios from 'axios';
 import L from 'leaflet';
 
-// Components
+import { api, apiErrorMessage } from './api';
 import SearchBar from './components/SearchBar';
 import MapLegend from './components/MapLegend';
 import RainfallChart from './components/RainfallChart';
-
-// Fix Leaflet default icon issue with bundlers
 import iconUrl from 'leaflet/dist/images/marker-icon.png';
 import iconShadow from 'leaflet/dist/images/marker-shadow.png';
 
+
 const DefaultIcon = L.icon({ iconUrl, shadowUrl: iconShadow, iconSize: [25, 41], iconAnchor: [12, 41] });
 L.Marker.prototype.options.icon = DefaultIcon;
+const PondIcon = L.divIcon({ html: '<span class="pond-marker" aria-hidden="true"></span>', className: '', iconSize: [22, 22], iconAnchor: [11, 11] });
+const imageryTileUrl = import.meta.env.VITE_IMAGERY_TILE_URL
+  || 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+const imageryAttribution = import.meta.env.VITE_IMAGERY_ATTRIBUTION
+  || 'Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community';
 
-// Custom icon for the proposed pond
-const PondIcon = L.divIcon({
-  html: '<div style="background:#ef4444;width:16px;height:16px;border-radius:50%;border:3px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.4)"></div>',
-  className: '',
-  iconSize: [22, 22],
-  iconAnchor: [11, 11],
-});
 
-const API_URL = "http://localhost:8000/api";
-
-/* ── Map click handler ─────────────────────────────────── */
-function LocationMarker({ position, setPosition, onAnalyze }) {
+function SelectionMarker({ position, onSelect }) {
   useMapEvents({
-    click(e) {
-      setPosition(e.latlng);
-      onAnalyze(e.latlng);
+    click(event) {
+      onSelect({ lat: event.latlng.lat, lng: event.latlng.lng }, null);
     },
   });
-
   return position ? (
     <Marker position={position}>
-      <Popup><strong>Selected Village Centre</strong><br />{position.lat.toFixed(4)}, {position.lng.toFixed(4)}</Popup>
+      <Popup>Selected analysis centre<br />{position.lat.toFixed(5)}, {position.lng.toFixed(5)}</Popup>
     </Marker>
   ) : null;
 }
 
-/* ── Fly map to location when search result is selected ── */
+
 function FlyTo({ center }) {
   const map = useMap();
-  const prevCenter = useRef(null);
-
+  const previous = useRef(null);
   useEffect(() => {
-    if (center && JSON.stringify(center) !== JSON.stringify(prevCenter.current)) {
-      prevCenter.current = center;
-      map.flyTo(center, 13, { duration: 1.5 });
+    if (center && `${center[0]}:${center[1]}` !== previous.current) {
+      previous.current = `${center[0]}:${center[1]}`;
+      map.flyTo(center, 13, { duration: 0.8 });
     }
   }, [center, map]);
-
   return null;
 }
 
-/* ── Main Application ────────────────────────────────── */
-function App() {
+
+const polygonPositions = (polygon = []) => polygon.map((point) => [point.lat, point.lng]);
+const numberOrDash = (value, digits = 1) => value == null ? '—' : Number(value).toLocaleString(undefined, { maximumFractionDigits: digits });
+const MAX_CONTOUR_FILE_BYTES = 15 * 1024 * 1024;
+const hasAnalysisContract = (value) => Boolean(
+  value
+  && ['complete', 'degraded', 'incomplete'].includes(value.analysis_status)
+  && value.quality?.sources
+  && Array.isArray(value.quality.warnings)
+  && value.elevation_stats
+  && value.runoff_stats
+  && value.rainfall_data
+  && value.land_analysis
+  && value.persistence,
+);
+const hasContourContract = (value) => Boolean(
+  value
+  && value.analysis_status === 'degraded'
+  && value.contour_summary
+  && value.grid
+  && value.pond_location
+  && value.catchment
+  && Array.isArray(value.catchment.boundary)
+  && Array.isArray(value.study_area_boundary)
+  && value.quality?.sources
+  && Array.isArray(value.quality.warnings),
+);
+
+
+export default function App() {
   const [position, setPosition] = useState(null);
-  const [analysisData, setAnalysisData] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [flyTarget, setFlyTarget] = useState(null);
-  const [error, setError] = useState(null);
-  const [radiusKm, setRadiusKm] = useState(2.0);
   const [villageName, setVillageName] = useState(null);
-  const [history, setHistory] = useState([]);
-  const [showHistory, setShowHistory] = useState(false);
+  const [coordinates, setCoordinates] = useState({ lat: '', lng: '' });
+  const [radiusKm, setRadiusKm] = useState(2);
+  const [analysis, setAnalysis] = useState(null);
+  const [contourAnalysis, setContourAnalysis] = useState(null);
+  const [contourFile, setContourFile] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [status, setStatus] = useState('Select a location, review the radius, then start the screening analysis.');
+  const [flyTarget, setFlyTarget] = useState(null);
+  const analysisAbortRef = useRef(null);
+  const analysisSequenceRef = useRef(0);
 
-  const formatPolygon = (poly) => poly.map(p => [p.lat, p.lng]);
+  useEffect(() => () => {
+    analysisSequenceRef.current += 1;
+    analysisAbortRef.current?.abort();
+  }, []);
 
-  const runAnalysis = async (latlng, name = null) => {
-    setLoading(true);
-    setError(null);
-    setAnalysisData(null);
-    try {
-      const resp = await axios.post(`${API_URL}/analyze`, {
-        center: { lat: latlng.lat, lng: latlng.lng },
-        radius_km: radiusKm,
-        village_name: name || villageName,
-      });
-      setAnalysisData(resp.data);
-      // Auto-zoom to analysis area after click-to-analyze
-      setFlyTarget([latlng.lat, latlng.lng]);
-    } catch (err) {
-      console.error("Analysis error:", err);
-      const detail = err.response?.data?.detail;
-      setError(detail ? `Analysis failed: ${detail}` : "Analysis failed. Is the backend running on port 8000?");
-    } finally {
-      setLoading(false);
-    }
+  const selectLocation = (nextPosition, name = null) => {
+    analysisSequenceRef.current += 1;
+    analysisAbortRef.current?.abort();
+    setLoading(false);
+    setPosition(nextPosition);
+    setCoordinates({ lat: nextPosition.lat.toFixed(6), lng: nextPosition.lng.toFixed(6) });
+    setVillageName(name);
+    setAnalysis(null);
+    setContourAnalysis(null);
+    setError('');
+    setFlyTarget([nextPosition.lat, nextPosition.lng]);
+    setStatus('Location selected. Review the analysis radius and press Start screening analysis.');
   };
 
   const handleVillageSelect = (result) => {
-    const latlng = { lat: result.lat, lng: result.lng };
-    const name = result.display_name.split(',')[0];
-    setPosition(latlng);
-    setVillageName(name);
-    setFlyTarget([result.lat, result.lng]);
-    runAnalysis(latlng, name);
+    selectLocation({ lat: result.lat, lng: result.lng }, result.display_name.split(',')[0]);
   };
 
-  const handleReset = () => {
-    setAnalysisData(null);
-    setPosition(null);
-    setError(null);
-    setFlyTarget(null);
-    setVillageName(null);
-    setShowHistory(false);
+  const submitCoordinates = (event) => {
+    event.preventDefault();
+    const lat = Number(coordinates.lat);
+    const lng = Number(coordinates.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat < -85 || lat > 85 || lng < -180 || lng > 180) {
+      setError('Enter a latitude from −85 to 85 and longitude from −180 to 180.');
+      return;
+    }
+    selectLocation({ lat, lng }, null);
   };
 
-  const loadHistory = async () => {
+  const runAnalysis = async () => {
+    if (!position) return;
+    analysisAbortRef.current?.abort();
+    const controller = new AbortController();
+    analysisAbortRef.current = controller;
+    const sequence = ++analysisSequenceRef.current;
+    setLoading(true);
+    setError('');
+    setAnalysis(null);
+    setContourAnalysis(null);
+    setStatus('Analysis in progress. External sources and hydrology quality are being checked.');
     try {
-      const resp = await axios.get(`${API_URL}/history`, { params: { limit: 10 } });
-      setHistory(resp.data || []);
-      setShowHistory(true);
-    } catch (err) {
-      console.error("History load error:", err);
+      const response = await api.post('/analyze', {
+        center: position,
+        radius_km: radiusKm,
+        village_name: villageName,
+      }, { signal: controller.signal });
+      if (sequence !== analysisSequenceRef.current) return;
+      if (!hasAnalysisContract(response.data)) {
+        throw new Error('The API returned an unsupported analysis contract.');
+      }
+      setAnalysis(response.data);
+      setStatus(`Analysis finished with ${response.data.analysis_status} status.`);
+      setFlyTarget([position.lat, position.lng]);
+    } catch (requestError) {
+      if (requestError?.code === 'ERR_CANCELED') {
+        if (sequence === analysisSequenceRef.current) setStatus('Analysis cancelled.');
+        return;
+      }
+      if (sequence === analysisSequenceRef.current) {
+        const message = apiErrorMessage(requestError, 'Analysis failed. Check backend readiness and try again.');
+        setError(message);
+        setStatus(`Analysis failed: ${message}`);
+      }
+    } finally {
+      if (sequence === analysisSequenceRef.current) setLoading(false);
     }
   };
 
-  // Colour helper for contour lines based on elevation
-  const getContourColor = (elevation, minElev, maxElev) => {
-    const t = maxElev > minElev ? (elevation - minElev) / (maxElev - minElev) : 0.5;
-    const r = Math.round(167 + t * 60);
-    const g = Math.round(139 - t * 60);
-    const b = Math.round(250 - t * 80);
-    return `rgb(${r},${g},${b})`;
+  const selectContourFile = (event) => {
+    const file = event.target.files?.[0] || null;
+    setContourFile(file);
+    setContourAnalysis(null);
+    setError('');
+    setStatus(file
+      ? `${file.name} selected. Press Analyze contour map to upload and compute the catchment.`
+      : 'Select a KML or KMZ contour map to start the file-based analysis.');
+  };
+
+  const runContourAnalysis = async (event) => {
+    event?.preventDefault?.();
+    if (!contourFile) {
+      setError('Select a KML or KMZ contour file first.');
+      return;
+    }
+    if (contourFile.size > MAX_CONTOUR_FILE_BYTES) {
+      setError('The contour file exceeds the 15 MiB upload limit.');
+      return;
+    }
+
+    analysisAbortRef.current?.abort();
+    const controller = new AbortController();
+    analysisAbortRef.current = controller;
+    const sequence = ++analysisSequenceRef.current;
+    const body = new FormData();
+    body.append('contour_file', contourFile);
+    setLoading(true);
+    setError('');
+    setAnalysis(null);
+    setContourAnalysis(null);
+    setStatus('Uploading contours and deriving the terrain, catchment and candidate pond point.');
+    try {
+      const response = await api.post('/analyze-contour', body, { signal: controller.signal });
+      if (sequence !== analysisSequenceRef.current) return;
+      if (!hasContourContract(response.data)) {
+        throw new Error('The API returned an unsupported contour-analysis contract.');
+      }
+      setContourAnalysis(response.data);
+      setPosition(null);
+      setVillageName(null);
+      setCoordinates({ lat: '', lng: '' });
+      setStatus('Contour analysis finished. The result is screening-only because the surface is interpolated from contour lines.');
+      setFlyTarget([response.data.pond_location.lat, response.data.pond_location.lng]);
+    } catch (requestError) {
+      if (requestError?.code === 'ERR_CANCELED') {
+        if (sequence === analysisSequenceRef.current) setStatus('Analysis cancelled.');
+        return;
+      }
+      if (sequence === analysisSequenceRef.current) {
+        const message = apiErrorMessage(requestError, 'Contour analysis failed. Check the file and backend readiness, then try again.');
+        setError(message);
+        setStatus(`Contour analysis failed: ${message}`);
+      }
+    } finally {
+      if (sequence === analysisSequenceRef.current) setLoading(false);
+    }
+  };
+
+  const cancelAnalysis = () => analysisAbortRef.current?.abort();
+
+  const reset = () => {
+    analysisSequenceRef.current += 1;
+    analysisAbortRef.current?.abort();
+    setLoading(false);
+    setPosition(null);
+    setVillageName(null);
+    setCoordinates({ lat: '', lng: '' });
+    setAnalysis(null);
+    setContourAnalysis(null);
+    setContourFile(null);
+    setError('');
+    setFlyTarget(null);
+    setStatus('Select a location, review the radius, then start the screening analysis.');
+  };
+
+  const contourColor = (elevation, minimum, maximum) => {
+    const ratio = maximum > minimum ? (elevation - minimum) / (maximum - minimum) : 0.5;
+    return `hsl(${260 - ratio * 55} 75% 66%)`;
   };
 
   return (
-    <div className="app-container">
-      {/* ── Map ──────────────────────────────────────── */}
-      <div className="map-container">
-        <MapContainer center={[20.5937, 78.9629]} zoom={5} style={{ height: "100%", width: "100%" }}>
+    <main className="app-container" aria-busy={loading}>
+      <section className="map-container" aria-label="Satellite map and analysis layers">
+        <MapContainer center={[20.5937, 78.9629]} zoom={5} style={{ height: '100%', width: '100%' }} keyboard>
           <TileLayer
-            url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-            attribution='Tiles &copy; Esri'
+            url={imageryTileUrl}
+            attribution={imageryAttribution}
           />
           <FlyTo center={flyTarget} />
-          <LocationMarker position={position} setPosition={setPosition} onAnalyze={runAnalysis} />
-
-          {analysisData && (
-            <>
-              {/* Catchment Area */}
-              <Polygon
-                positions={formatPolygon(analysisData.catchment_polygon)}
-                pathOptions={{ color: '#38bdf8', weight: 2, fillOpacity: 0.15, fillColor: '#38bdf8' }}
-              >
-                <Tooltip sticky>Catchment Area</Tooltip>
-              </Polygon>
-
-              {/* Contour Lines with elevation labels */}
-              {analysisData.contours.map((contour, idx) => {
-                const minE = analysisData.elevation_stats.min_elevation;
-                const maxE = analysisData.elevation_stats.max_elevation;
-                return (
-                  <Polyline
-                    key={idx}
-                    positions={formatPolygon(contour.points)}
-                    pathOptions={{
-                      color: getContourColor(contour.elevation, minE, maxE),
-                      weight: 1.5,
-                      opacity: 0.7,
-                      dashArray: '6 3',
-                    }}
-                  >
-                    <Tooltip sticky>{contour.elevation}m</Tooltip>
-                  </Polyline>
-                );
-              })}
-
-              {/* Available / Government Land (from CV analysis) */}
-              <Polygon
-                positions={formatPolygon(analysisData.government_land_polygon)}
-                pathOptions={{ color: '#fbbf24', weight: 2, fillOpacity: 0.1, dashArray: '5 5' }}
-              >
-                <Tooltip sticky>Available Land (Detected via CV)</Tooltip>
-              </Polygon>
-
-              {/* Proposed Pond Location */}
-              <Marker position={[analysisData.pond.lat, analysisData.pond.lng]} icon={PondIcon}>
-                <Popup>
-                  <strong>Proposed Pond</strong><br />
-                  Depth: {analysisData.pond.depth_m}m<br />
-                  Capacity: {analysisData.pond.capacity_m3.toLocaleString()} m³<br />
-                  <em style={{fontSize:'11px',opacity:0.7}}>Placed at lowest elevation in catchment</em>
-                </Popup>
-              </Marker>
-            </>
+          <SelectionMarker position={position} onSelect={selectLocation} />
+          {analysis?.catchment_polygon?.length >= 3 && (
+            <Polygon positions={polygonPositions(analysis.catchment_polygon)} pathOptions={{ color: '#38bdf8', weight: 2, fillOpacity: 0.14 }}>
+              <Tooltip sticky>Computed screening catchment</Tooltip>
+            </Polygon>
+          )}
+          {contourAnalysis?.study_area_boundary?.length >= 3 && (
+            <Polygon positions={polygonPositions(contourAnalysis.study_area_boundary)} pathOptions={{ color: '#fbbf24', weight: 2, fillOpacity: 0.04, dashArray: '7 5' }}>
+              <Tooltip sticky>Uploaded contour study boundary</Tooltip>
+            </Polygon>
+          )}
+          {contourAnalysis?.catchment?.boundary?.length >= 3 && (
+            <Polygon positions={polygonPositions(contourAnalysis.catchment.boundary)} pathOptions={{ color: '#38bdf8', weight: 2, fillOpacity: 0.14 }}>
+              <Tooltip sticky>Catchment derived from uploaded contours</Tooltip>
+            </Polygon>
+          )}
+          {analysis?.contours?.map((contour, index) => (
+            <Polyline
+              key={`${contour.elevation}:${index}`}
+              positions={polygonPositions(contour.points)}
+              pathOptions={{
+                color: contourColor(contour.elevation, analysis.elevation_stats.min_elevation, analysis.elevation_stats.max_elevation),
+                weight: 1.4,
+                opacity: 0.7,
+                dashArray: '6 3',
+              }}
+            >
+              <Tooltip sticky>{contour.elevation} m</Tooltip>
+            </Polyline>
+          ))}
+          {analysis?.candidate_land_polygon?.length >= 3 && (
+            <Polygon positions={polygonPositions(analysis.candidate_land_polygon)} pathOptions={{ color: '#fbbf24', weight: 2, fillOpacity: 0.1, dashArray: '5 5' }}>
+              <Tooltip sticky>Detected bare-surface candidate; ownership and suitability unverified</Tooltip>
+            </Polygon>
+          )}
+          {analysis?.pond && (
+            <Marker position={[analysis.pond.lat, analysis.pond.lng]} icon={PondIcon}>
+              <Popup>
+                <strong>Screening candidate only</strong><br />
+                Water depth: {analysis.pond.water_depth_m} m<br />
+                Capacity: {numberOrDash(analysis.pond.capacity_m3, 0)} m³
+              </Popup>
+            </Marker>
+          )}
+          {contourAnalysis?.pond_location && (
+            <Marker position={[contourAnalysis.pond_location.lat, contourAnalysis.pond_location.lng]} icon={PondIcon}>
+              <Popup>
+                <strong>Contour-derived candidate</strong><br />
+                Elevation: {numberOrDash(contourAnalysis.pond_location.elevation_m, 2)} m<br />
+                Catchment: {numberOrDash(contourAnalysis.catchment.area_hectares, 2)} ha
+              </Popup>
+            </Marker>
           )}
         </MapContainer>
+        {(analysis || contourAnalysis) && <MapLegend mode={contourAnalysis ? 'contour' : 'location'} />}
+      </section>
 
-        {/* Map Legend overlay */}
-        {analysisData && <MapLegend />}
-      </div>
+      <aside className="sidebar" aria-label="Pond screening controls and results">
+        <header className="header">
+          <p className="eyebrow">Decision-support prototype</p>
+          <h1>Village pond screening</h1>
+          <p>Terrain, rainfall and satellite evidence with explicit quality limits.</p>
+        </header>
 
-      {/* ── Sidebar ──────────────────────────────────── */}
-      <div className="sidebar">
-        <div className="header">
-          <h1>Pond Planning AI</h1>
-          <p>Village-level terrain & rainfall analysis</p>
+        <div className="screening-warning" role="note">
+          Not a construction design or land-ownership determination. Field and qualified engineering verification are required.
         </div>
 
-        {/* Search */}
+        <section className="contour-upload" aria-labelledby="contour-upload-heading">
+          <p className="eyebrow">Phase 2 file workflow</p>
+          <h2 id="contour-upload-heading">Analyze a contour map</h2>
+          <p>Upload a KML or KMZ file containing at least three elevation levels. Results are computed from the uploaded geometry.</p>
+          <form onSubmit={runContourAnalysis}>
+            <label htmlFor="contour-file">Contour file</label>
+            <input id="contour-file" type="file" accept=".kml,.kmz,application/vnd.google-earth.kml+xml,application/vnd.google-earth.kmz" onChange={selectContourFile} />
+            <div className="file-hint">Maximum 15 MiB. KML and KMZ only.</div>
+            <button className="btn" type="submit" disabled={!contourFile || loading}>Analyze contour map</button>
+          </form>
+        </section>
+
+        <div className="workflow-divider"><span>or use live sources by location</span></div>
+
         <SearchBar onSelect={handleVillageSelect} />
 
-        {/* Radius slider */}
+        <form className="coordinate-form" onSubmit={submitCoordinates}>
+          <fieldset>
+            <legend>Or enter coordinates</legend>
+            <label>Latitude<input type="number" step="0.000001" min="-85" max="85" value={coordinates.lat} onChange={(event) => setCoordinates({ ...coordinates, lat: event.target.value })} /></label>
+            <label>Longitude<input type="number" step="0.000001" min="-180" max="180" value={coordinates.lng} onChange={(event) => setCoordinates({ ...coordinates, lng: event.target.value })} /></label>
+          </fieldset>
+          <button className="btn btn-secondary" type="submit">Select coordinates</button>
+        </form>
+
         <div className="radius-control">
-          <label htmlFor="radius-slider">
-            Analysis Radius: <strong>{radiusKm.toFixed(1)} km</strong>
-          </label>
-          <input
-            id="radius-slider"
-            type="range"
-            min="0.5"
-            max="5.0"
-            step="0.5"
-            value={radiusKm}
-            onChange={(e) => setRadiusKm(parseFloat(e.target.value))}
-          />
+          <label htmlFor="radius-slider">Analysis radius: <strong>{radiusKm.toFixed(1)} km</strong></label>
+          <input id="radius-slider" type="range" min="0.5" max="5" step="0.5" value={radiusKm} onChange={(event) => setRadiusKm(Number(event.target.value))} />
         </div>
 
-        {/* Instructions */}
-        {!analysisData && !loading && !error && !showHistory && (
-          <div className="instruction-box">
-            Search for a village above or click anywhere on the map to select a location and run the analysis.
+        <div className="action-row">
+          <button className="btn" type="button" disabled={!position || loading} onClick={runAnalysis}>Start screening analysis</button>
+          {loading && <button className="btn btn-secondary" type="button" onClick={cancelAnalysis}>Cancel</button>}
+        </div>
+
+        <div className="sr-status" aria-live="polite" aria-atomic="true">{status}</div>
+        {loading && <div className="loading-box" role="status"><span className="spinner" aria-hidden="true" /><span>Checking source coverage and computing the watershed…</span></div>}
+        {error && <div className="error-box" role="alert"><p>{error}</p><button className="text-btn" type="button" onClick={contourFile && !position ? runContourAnalysis : runAnalysis}>Try again</button></div>}
+
+        {contourAnalysis && (
+          <div className="results">
+            <section className={`quality-banner ${contourAnalysis.analysis_status}`}>
+              <h2>Contour analysis: {contourAnalysis.analysis_status}</h2>
+              <p>Screening-only result. The terrain surface is interpolated from the uploaded contour geometry.</p>
+            </section>
+
+            {contourAnalysis.quality.warnings.length > 0 && (
+              <section className="warnings" aria-labelledby="contour-warning-heading">
+                <h2 id="contour-warning-heading">Limitations and warnings</h2>
+                <ul>{contourAnalysis.quality.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
+              </section>
+            )}
+
+            <section aria-labelledby="contour-summary-heading">
+              <h2 id="contour-summary-heading" className="section-label">Uploaded contour summary</h2>
+              <dl className="stats-grid">
+                <div><dt>Input file</dt><dd>{contourAnalysis.input_file}</dd></div>
+                <div><dt>Format</dt><dd>{contourAnalysis.input_format.toUpperCase()}</dd></div>
+                <div><dt>Contour lines</dt><dd>{numberOrDash(contourAnalysis.contour_summary.contour_count, 0)}</dd></div>
+                <div><dt>Source vertices</dt><dd>{numberOrDash(contourAnalysis.contour_summary.source_point_count, 0)}</dd></div>
+                <div><dt>Elevation levels</dt><dd>{numberOrDash(contourAnalysis.contour_summary.elevation_level_count, 0)}</dd></div>
+                <div><dt>Elevation range</dt><dd>{numberOrDash(contourAnalysis.contour_summary.minimum_elevation_m, 2)} to {numberOrDash(contourAnalysis.contour_summary.maximum_elevation_m, 2)} m</dd></div>
+                <div><dt>Median interval</dt><dd>{numberOrDash(contourAnalysis.contour_summary.median_contour_interval_m, 2)} m</dd></div>
+                <div><dt>Grid</dt><dd>{contourAnalysis.grid.rows} x {contourAnalysis.grid.columns}</dd></div>
+                <div><dt>Grid cell</dt><dd>{numberOrDash(contourAnalysis.grid.cell_size_m, 2)} m</dd></div>
+                <div><dt>Observed cells</dt><dd>{(contourAnalysis.grid.observed_cell_ratio * 100).toFixed(2)}%</dd></div>
+                <div><dt>Catchment</dt><dd>{numberOrDash(contourAnalysis.catchment.area_hectares, 4)} ha</dd></div>
+                <div><dt>Study-grid share</dt><dd>{(contourAnalysis.catchment.study_grid_fraction * 100).toFixed(2)}%</dd></div>
+              </dl>
+            </section>
+
+            <section className="pond-recommendation" aria-labelledby="contour-pond-heading">
+              <h2 id="contour-pond-heading">Contour-derived pond candidate</h2>
+              <dl>
+                <div><dt>Point</dt><dd>{contourAnalysis.pond_location.lat.toFixed(6)}, {contourAnalysis.pond_location.lng.toFixed(6)}</dd></div>
+                <div><dt>Elevation</dt><dd>{numberOrDash(contourAnalysis.pond_location.elevation_m, 3)} m</dd></div>
+                <div><dt>Selection</dt><dd>{contourAnalysis.pond_location.selection_method}</dd></div>
+                <div><dt>Interpolation</dt><dd>{contourAnalysis.grid.method}</dd></div>
+              </dl>
+            </section>
+
+            <button className="btn btn-secondary" type="button" onClick={reset}>Reset analysis</button>
           </div>
         )}
 
-        {/* Loading */}
-        {loading && (
-          <div className="loading-box">
-            <div className="spinner"></div>
-            <div>
-              <strong>Analyzing terrain...</strong>
-              <p className="loading-detail">Fetching elevation data, running D8 watershed analysis, downloading satellite imagery...</p>
-            </div>
+        {analysis && (
+          <div className="results">
+            <section className={`quality-banner ${analysis.analysis_status}`}>
+              <h2>Analysis status: {analysis.analysis_status}</h2>
+              <p>{analysis.quality.screening_only ? 'Screening-only result. Do not use directly for excavation or construction.' : ''}</p>
+            </section>
+
+            {analysis.quality.warnings.length > 0 && (
+              <section className="warnings" aria-labelledby="warning-heading">
+                <h2 id="warning-heading">Limitations and warnings</h2>
+                <ul>{analysis.quality.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
+              </section>
+            )}
+
+            <section aria-labelledby="source-heading">
+              <h2 id="source-heading" className="section-label">Source quality</h2>
+              <div className="source-list">
+                {Object.entries(analysis.quality.sources).map(([key, source]) => (
+                  <details key={key}>
+                    <summary><span>{source.name}</span><span className={`status-chip ${source.status}`}>{source.status}</span></summary>
+                    <dl>
+                      {source.resolution && <><dt>Resolution</dt><dd>{source.resolution}</dd></>}
+                      {source.period && <><dt>Period</dt><dd>{source.period}</dd></>}
+                      {source.model && <><dt>Model</dt><dd>{source.model}</dd></>}
+                      <dt>Retrieved</dt><dd>{new Date(source.retrieved_at).toLocaleString()}</dd>
+                      {source.message && <><dt>Note</dt><dd>{source.message}</dd></>}
+                      {source.license_url && <><dt>Source terms</dt><dd><a href={source.license_url} target="_blank" rel="noreferrer">Open provider documentation</a></dd></>}
+                    </dl>
+                  </details>
+                ))}
+              </div>
+            </section>
+
+            <section aria-labelledby="terrain-heading">
+              <h2 id="terrain-heading" className="section-label">Terrain and hydrology</h2>
+              <dl className="stats-grid">
+                <div><dt>Minimum elevation</dt><dd>{numberOrDash(analysis.elevation_stats.min_elevation)} m</dd></div>
+                <div><dt>Maximum elevation</dt><dd>{numberOrDash(analysis.elevation_stats.max_elevation)} m</dd></div>
+                <div><dt>Grid cell</dt><dd>{numberOrDash(analysis.elevation_stats.cell_size_m)} m</dd></div>
+                <div><dt>Catchment</dt><dd>{numberOrDash(analysis.runoff_stats.catchment_area_sqm / 10000, 2)} ha</dd></div>
+                <div><dt>Rainfall</dt><dd>{numberOrDash(analysis.rainfall_data.annual_avg_mm)} mm/year</dd></div>
+                <div><dt>Runoff volume</dt><dd>{numberOrDash(analysis.runoff_stats.estimated_volume_m3, 0)} m³/year</dd></div>
+                <div><dt>Runoff coefficient</dt><dd>{numberOrDash(analysis.runoff_stats.runoff_coefficient, 3)}</dd></div>
+                <div><dt>Coefficient basis</dt><dd>{analysis.runoff_stats.runoff_coefficient_basis || 'Not configured'}</dd></div>
+                <div><dt>Peak discharge</dt><dd>{analysis.runoff_stats.peak_discharge_m3_s == null ? 'Not configured' : `${numberOrDash(analysis.runoff_stats.peak_discharge_m3_s, 4)} m³/s`}</dd></div>
+              </dl>
+            </section>
+
+            <section aria-labelledby="land-heading">
+              <h2 id="land-heading" className="section-label">Satellite surface screening</h2>
+              <dl className="stats-grid">
+                <div><dt>Bare surface</dt><dd>{analysis.land_analysis.bare_surface_ratio == null ? 'Unavailable' : `${(analysis.land_analysis.bare_surface_ratio * 100).toFixed(1)}%`}</dd></div>
+                <div><dt>Vegetation</dt><dd>{analysis.land_analysis.vegetation_ratio == null ? 'Unavailable' : `${(analysis.land_analysis.vegetation_ratio * 100).toFixed(1)}%`}</dd></div>
+                <div><dt>Water</dt><dd>{analysis.land_analysis.water_ratio == null ? 'Unavailable' : `${(analysis.land_analysis.water_ratio * 100).toFixed(1)}%`}</dd></div>
+                <div><dt>Candidate overlap</dt><dd>{numberOrDash(analysis.land_analysis.candidate_area_sqm, 0)} m²</dd></div>
+              </dl>
+            </section>
+
+            <RainfallChart monthly={analysis.rainfall_data.monthly} />
+
+            <section className="pond-recommendation" aria-labelledby="pond-heading">
+              <h2 id="pond-heading">Pond screening result</h2>
+              {analysis.pond ? (
+                <dl>
+                  <div><dt>Candidate point</dt><dd>{analysis.pond.lat.toFixed(5)}, {analysis.pond.lng.toFixed(5)}</dd></div>
+                  <div><dt>Water / excavation depth</dt><dd>{analysis.pond.water_depth_m} / {analysis.pond.excavation_depth_m} m</dd></div>
+                  <div><dt>Water dimensions</dt><dd>{analysis.pond.water_length_m} × {analysis.pond.water_width_m} m</dd></div>
+                  <div><dt>Excavation crest dimensions</dt><dd>{analysis.pond.crest_length_m} × {analysis.pond.crest_width_m} m</dd></div>
+                  <div><dt>Bottom dimensions</dt><dd>{analysis.pond.bottom_length_m} × {analysis.pond.bottom_width_m} m</dd></div>
+                  <div><dt>Capacity</dt><dd>{numberOrDash(analysis.pond.capacity_m3, 0)} m³</dd></div>
+                  <div><dt>Excavation volume</dt><dd>{numberOrDash(analysis.pond.excavation_volume_m3, 0)} m³</dd></div>
+                  <div><dt>Excavation footprint</dt><dd>{numberOrDash(analysis.pond.excavation_footprint_area_sqm, 0)} m²</dd></div>
+                  <div><dt>Side slope</dt><dd>{analysis.pond.side_slope_h_to_v}H:1V</dd></div>
+                </dl>
+              ) : <p>No pond candidate was produced because one or more required evidence gates failed.</p>}
+            </section>
+
+            <button className="btn btn-secondary" type="button" onClick={reset}>Reset analysis</button>
           </div>
         )}
-
-        {/* Error */}
-        {error && (
-          <div className="error-box">{error}</div>
-        )}
-
-        {/* Results */}
-        {analysisData && (
-          <>
-            {/* Elevation Stats */}
-            <div className="section-label">Elevation Profile</div>
-            <div className="stats-grid">
-              <div className="stat-card">
-                <span className="stat-label">Min Elevation</span>
-                <div><span className="stat-value">{analysisData.elevation_stats.min_elevation}</span><span className="stat-unit"> m</span></div>
-              </div>
-              <div className="stat-card">
-                <span className="stat-label">Max Elevation</span>
-                <div><span className="stat-value">{analysisData.elevation_stats.max_elevation}</span><span className="stat-unit"> m</span></div>
-              </div>
-              <div className="stat-card">
-                <span className="stat-label">Mean Elevation</span>
-                <div><span className="stat-value">{analysisData.elevation_stats.mean_elevation}</span><span className="stat-unit"> m</span></div>
-              </div>
-              <div className="stat-card">
-                <span className="stat-label">Relief</span>
-                <div><span className="stat-value">{analysisData.elevation_stats.relief}</span><span className="stat-unit"> m</span></div>
-              </div>
-            </div>
-
-            {/* Hydrology Stats */}
-            <div className="section-label">Hydrology & Runoff</div>
-            <div className="stats-grid">
-              <div className="stat-card">
-                <span className="stat-label">Catchment Area</span>
-                <div><span className="stat-value">{(analysisData.runoff_stats.catchment_area_sqm / 10000).toFixed(2)}</span><span className="stat-unit"> ha</span></div>
-              </div>
-              <div className="stat-card">
-                <span className="stat-label">Annual Rainfall</span>
-                <div><span className="stat-value">{analysisData.rainfall_data.annual_avg_mm}</span><span className="stat-unit"> mm</span></div>
-              </div>
-              <div className="stat-card">
-                <span className="stat-label">Est. Runoff</span>
-                <div><span className="stat-value">{analysisData.runoff_stats.estimated_volume_m3.toLocaleString()}</span><span className="stat-unit"> m³</span></div>
-              </div>
-              <div className="stat-card">
-                <span className="stat-label">Runoff Coeff.</span>
-                <div><span className="stat-value">{analysisData.runoff_stats.runoff_coefficient}</span></div>
-              </div>
-            </div>
-
-            {/* Land Analysis */}
-            <div className="section-label">Land Cover (OpenCV)</div>
-            <div className="stats-grid cols-2">
-              <div className="stat-card">
-                <span className="stat-label">Barren Land</span>
-                <div><span className="stat-value">{(analysisData.land_analysis.barren_ratio * 100).toFixed(1)}</span><span className="stat-unit">%</span></div>
-              </div>
-              <div className="stat-card">
-                <span className="stat-label">Adjusted Coeff.</span>
-                <div><span className="stat-value">{analysisData.land_analysis.adjusted_runoff_coeff}</span></div>
-              </div>
-            </div>
-
-            {/* Rainfall Chart */}
-            <RainfallChart monthly={analysisData.rainfall_data.monthly} />
-
-            {/* Pond Recommendation */}
-            <div className="pond-recommendation">
-              <h3>
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>
-                </svg>
-                Recommended Pond
-              </h3>
-              <div className="pond-details">
-                <div className="detail-row">
-                  <span>Location</span>
-                  <strong>{analysisData.pond.lat.toFixed(4)}°, {analysisData.pond.lng.toFixed(4)}°</strong>
-                </div>
-                <div className="detail-row">
-                  <span>Target Depth</span>
-                  <strong>{analysisData.pond.depth_m} m</strong>
-                </div>
-                <div className="detail-row">
-                  <span>Storage Capacity</span>
-                  <strong>{analysisData.pond.capacity_m3.toLocaleString()} m³</strong>
-                </div>
-                <div className="detail-row">
-                  <span>Surface Area</span>
-                  <strong>{Math.round(analysisData.pond.surface_area_sqm).toLocaleString()} m²</strong>
-                </div>
-              </div>
-            </div>
-
-            <button id="reset-btn" className="btn" onClick={handleReset}>
-              Reset Analysis
-            </button>
-          </>
-        )}
-
-        {/* History Button (show when idle) */}
-        {!analysisData && !loading && (
-          <button id="history-btn" className="btn btn-secondary" onClick={loadHistory}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{marginRight:'6px',verticalAlign:'middle'}}>
-              <circle cx="12" cy="12" r="10"/>
-              <polyline points="12 6 12 12 16 14"/>
-            </svg>
-            View Past Analyses
-          </button>
-        )}
-
-        {/* History Panel */}
-        {showHistory && history.length > 0 && !analysisData && (
-          <div className="history-panel">
-            <div className="section-label">Analysis History</div>
-            {history.map((item) => (
-              <div key={item.id} className="history-card">
-                <div className="history-header">
-                  <strong>{item.village_name || `(${item.center_lat.toFixed(3)}°, ${item.center_lng.toFixed(3)}°)`}</strong>
-                  <span className="history-date">{new Date(item.created_at).toLocaleDateString()}</span>
-                </div>
-                <div className="history-stats">
-                  {item.annual_rainfall_mm != null && <span>🌧 {item.annual_rainfall_mm.toFixed(0)} mm</span>}
-                  {item.estimated_volume_m3 != null && <span>💧 {item.estimated_volume_m3.toLocaleString()} m³</span>}
-                  {item.pond_depth_m != null && <span>📏 {item.pond_depth_m} m deep</span>}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {showHistory && history.length === 0 && !analysisData && (
-          <div className="instruction-box">No past analyses found.</div>
-        )}
-      </div>
-    </div>
+      </aside>
+    </main>
   );
 }
-
-export default App;

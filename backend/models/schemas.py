@@ -1,115 +1,211 @@
-"""
-Pydantic Schemas — API request/response models
-"""
+"""Pydantic request and response contracts for screening analyses."""
 
-from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional
+from datetime import datetime
+from typing import Dict, List, Literal, Optional
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-class Coordinates(BaseModel):
-    """A geographic point with latitude and longitude."""
-    lat: float = Field(..., description="Latitude in decimal degrees")
-    lng: float = Field(..., description="Longitude in decimal degrees")
+class APIModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    @field_validator("lat")
+
+class Coordinates(APIModel):
+    lat: float = Field(..., ge=-85.0, le=85.0)
+    lng: float = Field(..., ge=-180.0, le=180.0)
+
+    @field_validator("lat", "lng")
     @classmethod
-    def validate_lat(cls, v):
-        if not -90 <= v <= 90:
-            raise ValueError("Latitude must be between -90 and 90")
-        return round(v, 6)
+    def round_coordinate(cls, value: float) -> float:
+        return round(value, 6)
 
-    @field_validator("lng")
+
+class AnalysisRequest(APIModel):
+    center: Coordinates
+    radius_km: float = Field(2.0, ge=0.5, le=10.0)
+    village_name: Optional[str] = Field(None, max_length=200)
+
+    @field_validator("village_name")
     @classmethod
-    def validate_lng(cls, v):
-        if not -180 <= v <= 180:
-            raise ValueError("Longitude must be between -180 and 180")
-        return round(v, 6)
+    def normalize_name(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = " ".join(value.split())
+        return normalized or None
 
 
-class AnalysisRequest(BaseModel):
-    """Request body for the /api/analyze endpoint."""
-    center: Coordinates = Field(..., description="Centre point of the analysis area")
-    radius_km: float = Field(2.0, ge=0.5, le=10.0, description="Radius in km around the centre to analyze")
-    village_name: Optional[str] = Field(None, description="Optional village name for record-keeping")
+class SourceMetadata(APIModel):
+    name: str
+    status: Literal["reliable", "degraded", "unavailable"]
+    retrieved_at: datetime
+    resolution: Optional[str] = None
+    period: Optional[str] = None
+    model: Optional[str] = None
+    coverage_ratio: Optional[float] = None
+    message: Optional[str] = None
+    license_url: Optional[str] = None
 
 
-class ContourLine(BaseModel):
-    """A single contour line with its elevation and geographic points."""
-    elevation: float = Field(..., description="Elevation of this contour in metres above sea level")
-    points: List[Coordinates] = Field(..., description="Ordered list of points forming the contour line")
+class AnalysisQuality(APIModel):
+    status: Literal["complete", "degraded", "incomplete"]
+    screening_only: bool = True
+    sources: Dict[str, SourceMetadata]
+    warnings: List[str] = Field(default_factory=list)
 
 
-class ElevationStats(BaseModel):
-    """Summary statistics of the elevation data within the analysis area."""
-    min_elevation: float = Field(..., description="Minimum elevation in metres")
-    max_elevation: float = Field(..., description="Maximum elevation in metres")
-    mean_elevation: float = Field(..., description="Mean elevation in metres")
-    relief: float = Field(..., description="Total relief (max − min) in metres")
+class ContourLine(APIModel):
+    elevation: float
+    points: List[Coordinates]
 
 
-class MonthlyRainfall(BaseModel):
-    """Rainfall data for a single month."""
-    month: str = Field(..., description="Month name (e.g., 'January')")
-    rainfall_mm: float = Field(..., description="Average rainfall for this month in mm")
+class ElevationStats(APIModel):
+    min_elevation: float
+    max_elevation: float
+    mean_elevation: float
+    relief: float
+    grid_size: int
+    cell_size_m: float
 
 
-class RainfallData(BaseModel):
-    """Complete rainfall information including annual and monthly breakdown."""
-    annual_avg_mm: float = Field(..., description="Average annual rainfall in mm")
-    monthly: List[MonthlyRainfall] = Field(..., description="Monthly rainfall breakdown (12 entries)")
+class MonthlyRainfall(APIModel):
+    month: str
+    rainfall_mm: float
+    valid_years: int
 
 
-class LandAnalysis(BaseModel):
-    """Results of OpenCV-based satellite image land-cover analysis."""
-    barren_ratio: float = Field(..., description="Fraction of area classified as barren (0–1)")
-    adjusted_runoff_coeff: float = Field(..., description="Runoff coefficient adjusted by land cover")
+class RainfallData(APIModel):
+    annual_avg_mm: Optional[float] = None
+    valid_years: int = 0
+    monthly: List[MonthlyRainfall] = Field(default_factory=list)
 
 
-class RunoffStats(BaseModel):
-    """Hydrological runoff estimation results."""
-    catchment_area_sqm: float = Field(..., description="Catchment area in square metres")
-    annual_rainfall_mm: float = Field(..., description="Average annual rainfall in mm")
-    runoff_coefficient: float = Field(..., description="Runoff coefficient used for estimation")
-    estimated_volume_m3: float = Field(..., description="Estimated annual runoff volume in cubic metres")
+class LandAnalysis(APIModel):
+    status: Literal["reliable", "degraded", "unavailable"]
+    bare_surface_ratio: Optional[float] = None
+    vegetation_ratio: Optional[float] = None
+    water_ratio: Optional[float] = None
+    low_saturation_surface_ratio: Optional[float] = None
+    candidate_area_sqm: Optional[float] = None
+    method: str = "RGB/HSV screening heuristic"
 
 
-class PondRecommendation(BaseModel):
-    """Recommended pond dimensions and location."""
-    lat: float = Field(..., description="Recommended pond latitude")
-    lng: float = Field(..., description="Recommended pond longitude")
-    depth_m: float = Field(..., description="Recommended pond depth in metres")
-    capacity_m3: float = Field(..., description="Pond storage capacity in cubic metres")
-    surface_area_sqm: float = Field(..., description="Pond surface area in square metres")
+class RunoffStats(APIModel):
+    catchment_area_sqm: float
+    annual_rainfall_mm: Optional[float] = None
+    runoff_coefficient: Optional[float] = None
+    runoff_coefficient_basis: Optional[str] = None
+    estimated_volume_m3: Optional[float] = None
+    peak_discharge_m3_s: Optional[float] = None
+    volume_method: str = "Runoff-coefficient annual volume estimate"
+    peak_method: Optional[str] = None
 
 
-class AnalysisResponse(BaseModel):
-    """Full response from the analysis endpoint, containing all computed data."""
-    pond: PondRecommendation
+class PondRecommendation(APIModel):
+    lat: float
+    lng: float
+    water_depth_m: float
+    excavation_depth_m: float
+    freeboard_m: float
+    capacity_m3: float
+    water_surface_area_sqm: float
+    excavation_footprint_area_sqm: float
+    excavation_volume_m3: float
+    water_length_m: float
+    water_width_m: float
+    bottom_area_sqm: float
+    crest_length_m: float
+    crest_width_m: float
+    bottom_length_m: float
+    bottom_width_m: float
+    side_slope_h_to_v: float
+    capture_efficiency: float
+    constrained_by_available_area: bool
+
+
+class PersistenceStatus(APIModel):
+    status: Literal["saved", "disabled", "failed"]
+    record_id: Optional[int] = None
+    message: Optional[str] = None
+
+
+class AnalysisResponse(APIModel):
+    analysis_status: Literal["complete", "degraded", "incomplete"]
+    quality: AnalysisQuality
+    pond: Optional[PondRecommendation] = None
     runoff_stats: RunoffStats
-    government_land_polygon: List[Coordinates]
-    catchment_polygon: List[Coordinates]
-    contours: List[ContourLine]
+    candidate_land_polygon: List[Coordinates] = Field(default_factory=list)
+    catchment_polygon: List[Coordinates] = Field(default_factory=list)
+    contours: List[ContourLine] = Field(default_factory=list)
     elevation_stats: ElevationStats
     rainfall_data: RainfallData
     land_analysis: LandAnalysis
+    persistence: PersistenceStatus
 
 
-class VillageSearchResult(BaseModel):
-    """A single result from the village geocoding search."""
-    display_name: str = Field(..., description="Full display name from Nominatim")
-    lat: float
-    lng: float
+class ContourSummary(APIModel):
+    contour_count: int = Field(..., ge=3)
+    source_point_count: int = Field(..., ge=6)
+    elevation_level_count: int = Field(..., ge=3)
+    minimum_elevation_m: float
+    maximum_elevation_m: float
+    median_contour_interval_m: Optional[float] = Field(None, gt=0)
 
 
-class HistoryItem(BaseModel):
-    """A past analysis record from the database."""
+class ContourGrid(APIModel):
+    rows: int = Field(..., ge=3)
+    columns: int = Field(..., ge=3)
+    cell_size_m: float = Field(..., gt=0)
+    observed_cell_ratio: float = Field(..., gt=0, le=1)
+    interpolation_iterations: int = Field(..., ge=1)
+    interpolation_converged: bool
+    method: str
+
+
+class ContourPondLocation(Coordinates):
+    elevation_m: float
+    selection_method: str
+
+
+class ContourCatchment(APIModel):
+    area_sqm: float = Field(..., gt=0)
+    area_hectares: float = Field(..., gt=0)
+    cell_count: int = Field(..., ge=3)
+    study_grid_fraction: float = Field(..., gt=0, le=1)
+    boundary: List[Coordinates] = Field(..., min_length=3)
+
+
+class ContourAnalysisResponse(APIModel):
+    analysis_status: Literal["degraded"]
+    input_file: str = Field(..., min_length=1, max_length=255)
+    input_format: Literal["kml", "kmz"]
+    contour_summary: ContourSummary
+    grid: ContourGrid
+    pond_location: ContourPondLocation
+    catchment: ContourCatchment
+    study_area_boundary: List[Coordinates] = Field(..., min_length=3)
+    quality: AnalysisQuality
+
+
+class VillageSearchResult(APIModel):
+    display_name: str = Field(..., min_length=1, max_length=500)
+    lat: float = Field(..., ge=-85.0, le=85.0)
+    lng: float = Field(..., ge=-180.0, le=180.0)
+
+
+class HistoryItem(APIModel):
     id: int
-    created_at: str
+    created_at: datetime
     center_lat: float
     center_lng: float
     village_name: Optional[str] = None
+    analysis_status: Optional[str] = None
     catchment_area_sqm: Optional[float] = None
     annual_rainfall_mm: Optional[float] = None
     estimated_volume_m3: Optional[float] = None
     pond_depth_m: Optional[float] = None
     pond_capacity_m3: Optional[float] = None
+
+
+class HealthResponse(APIModel):
+    status: Literal["ok", "degraded"]
+    checks: Dict[str, str] = Field(default_factory=dict)

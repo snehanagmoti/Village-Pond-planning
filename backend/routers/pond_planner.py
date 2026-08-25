@@ -1,231 +1,438 @@
-"""
-Pond Planner Router
--------------------
-API endpoints for the Village Pond Planning System.
+"""Version-2 screening analysis, explicit place search, and protected history APIs."""
 
-Endpoints:
-    POST /api/analyze          — Full terrain + rainfall + land analysis
-    GET  /api/search-village   — Geocode a village name to coordinates
-    GET  /api/history          — Retrieve past analysis records
-"""
-
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy.orm import Session
-from models.schemas import (
-    AnalysisRequest, AnalysisResponse, RunoffStats, PondRecommendation,
-    Coordinates, ContourLine, ElevationStats, RainfallData,
-    MonthlyRainfall, LandAnalysis, VillageSearchResult, HistoryItem,
-)
-from models.database import get_db, PondAnalysis
-from services.elevation import fetch_elevation_grid
-from services.terrain import run_terrain_analysis, calculate_runoff, recommend_pond_dimensions
-from services.rainfall import get_rainfall_data
-from services.cv_analyzer import download_satellite_tile, analyze_satellite_image, barren_contour_to_polygon
-from services.geocoding import search_village
-from typing import List
+import asyncio
+import hmac
 import logging
+from datetime import datetime, timezone
+from typing import Annotated, List
+
+from fastapi import APIRouter, File, Header, HTTPException, Query, Request, UploadFile
+
+from config import get_settings
+from models.database import fetch_history, save_analysis
+from models.schemas import (
+    AnalysisQuality,
+    AnalysisRequest,
+    AnalysisResponse,
+    ContourAnalysisResponse,
+    ContourLine,
+    Coordinates,
+    ElevationStats,
+    HistoryItem,
+    LandAnalysis,
+    MonthlyRainfall,
+    PersistenceStatus,
+    PondRecommendation,
+    RainfallData,
+    RunoffStats,
+    SourceMetadata,
+    VillageSearchResult,
+)
+from services.contour_analyzer import ContourFileError, analyze_contour_file
+from services.cv_analyzer import (
+    LandCoverResult,
+    analyze_satellite_image,
+    contour_to_polygon,
+    download_satellite_mosaic,
+)
+from services.elevation import fetch_elevation_grid
+from services.geocoding import search_village
+from services.quality import AnalysisValidationError, SourceInfo, UpstreamDataError
+from services.rainfall import get_rainfall_data
+from services.rate_limit import limiter
+from services.terrain import (
+    calculate_peak_discharge,
+    calculate_runoff,
+    recommend_pond_geometry,
+    run_terrain_analysis,
+)
 
 logger = logging.getLogger(__name__)
-
+settings = get_settings()
 router = APIRouter()
 
 
-@router.post("/analyze", response_model=AnalysisResponse, summary="Run full pond analysis")
-async def analyze_location(request: AnalysisRequest, db: Session = Depends(get_db)):
+def _source_model(source: SourceInfo) -> SourceMetadata:
+    return SourceMetadata(**source.to_dict())
+
+
+def _unavailable_source(name: str, message: str) -> SourceMetadata:
+    return SourceMetadata(
+        name=name,
+        status="unavailable",
+        retrieved_at=datetime.now(timezone.utc).isoformat(),
+        message=message,
+    )
+
+
+@router.post(
+    "/analyze-contour",
+    response_model=ContourAnalysisResponse,
+    summary="Analyze an uploaded KML/KMZ contour map",
+)
+@router.post(
+    "/analyzeContour",
+    response_model=ContourAnalysisResponse,
+    include_in_schema=False,
+)
+@router.post(
+    "/findCatchment",
+    response_model=ContourAnalysisResponse,
+    include_in_schema=False,
+)
+async def analyze_contour_upload(
+    request: Request,
+    contour_file: Annotated[
+        UploadFile,
+        File(description="Contour map in KML or KMZ format"),
+    ],
+) -> ContourAnalysisResponse:
+    """Reconstruct terrain from uploaded contours and delineate a watershed.
+
+    ``/api/analyzeContour`` and ``/api/findCatchment`` are compatibility aliases
+    for the assignment wording; ``/api/analyze-contour`` is the documented route.
     """
-    Perform a complete terrain, rainfall, and land-cover analysis for pond planning.
-
-    Pipeline:
-    1. Fetch real DEM elevation grid from Open-Meteo
-    2. Download satellite tile and run OpenCV barren-land detection
-    3. Run D8 flow direction → flow accumulation → watershed delineation
-    4. Query 11-year historical rainfall from Open-Meteo
-    5. Calculate runoff volume (Rational Method) with CV-adjusted coefficient
-    6. Recommend pond dimensions and optimal location (lowest elevation point)
-    7. Save everything to PostgreSQL for auditing
-    """
-    lat = request.center.lat
-    lng = request.center.lng
-    radius = request.radius_km
-
-    logger.info("=== Analysis started for (%.4f, %.4f) radius=%.1f km ===", lat, lng, radius)
-
-    # ── Step 1: Fetch real elevation data ──────────────────────
-    logger.info("Step 1: Fetching elevation grid...")
-    dem, lat_array, lng_array = await fetch_elevation_grid(lat, lng, radius, grid_size=25)
-
-    # ── Step 2: Satellite land-cover analysis (OpenCV) ─────────
-    logger.info("Step 2: Downloading satellite tile for CV analysis...")
-    sat_img = await download_satellite_tile(lat, lng, zoom=14)
-
-    barren_ratio = 0.3
-    adjusted_c = 0.3
-    gov_land_raw = []
-
-    if sat_img is not None:
-        logger.info("Step 2b: Running OpenCV land analysis...")
-        cv_result = analyze_satellite_image(sat_img)
-        barren_ratio = cv_result["barren_ratio"]
-        adjusted_c = cv_result["adjusted_runoff_coeff"]
-
-        if cv_result["barren_contour"] is not None:
-            gov_land_raw = barren_contour_to_polygon(
-                cv_result["barren_contour"], lat, lng, sat_img.shape, zoom=14
-            )
-    else:
-        logger.warning("Satellite tile unavailable, using default barren ratio")
-
-    # ── Step 3: Terrain analysis (D8, watershed, contours) ─────
-    logger.info("Step 3: Running terrain analysis (D8 flow, watershed, contours)...")
-    terrain_result = run_terrain_analysis(dem, lat_array, lng_array, gov_land_raw)
-
-    catchment_polygon_raw = terrain_result["catchment_polygon"]
-    contours_raw = terrain_result["contours"]
-    catchment_area_sqm = terrain_result["catchment_area_sqm"]
-    pond_lat = terrain_result["pond_lat"]
-    pond_lng = terrain_result["pond_lng"]
-    elev_stats = terrain_result["elevation_stats"]
-
-    # Convert to Pydantic models
-    catchment_polygon = [Coordinates(lat=p["lat"], lng=p["lng"]) for p in catchment_polygon_raw]
-    contours = [
-        ContourLine(
-            elevation=c["elevation"],
-            points=[Coordinates(lat=p["lat"], lng=p["lng"]) for p in c["points"]],
+    await limiter.enforce(request, "contour", settings.rate_contour_per_minute)
+    filename = contour_file.filename or "upload.kml"
+    try:
+        document = await contour_file.read(settings.contour_max_upload_bytes + 1)
+    finally:
+        await contour_file.close()
+    if len(document) > settings.contour_max_upload_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "code": "contour_file_too_large",
+                "message": (
+                    "Contour upload exceeds the configured "
+                    f"{settings.contour_max_upload_bytes // (1024 * 1024)} MB limit"
+                ),
+            },
         )
-        for c in contours_raw
-    ]
-    elevation_stats = ElevationStats(**elev_stats)
+    try:
+        result = await asyncio.to_thread(analyze_contour_file, document, filename)
+    except ContourFileError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_contour_file", "message": str(exc)},
+        ) from exc
+    except Exception as exc:
+        logger.exception("contour_analysis_failed filename=%s", filename)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "contour_analysis_failed",
+                "message": "Contour analysis failed unexpectedly",
+            },
+        ) from exc
+    return ContourAnalysisResponse(**result)
 
-    # ── Step 4: Rainfall data ──────────────────────────────────
-    logger.info("Step 4: Fetching rainfall data...")
-    rainfall_result = await get_rainfall_data(lat, lng)
-    annual_rainfall_mm = rainfall_result["annual_avg_mm"]
-    monthly_rainfall = [
-        MonthlyRainfall(month=m["month"], rainfall_mm=m["rainfall_mm"])
-        for m in rainfall_result["monthly"]
-    ]
-    rainfall_data = RainfallData(annual_avg_mm=annual_rainfall_mm, monthly=monthly_rainfall)
 
-    # Convert raw CV polygon to Coordinates, or apply fallback
-    if gov_land_raw:
-        gov_land_polygon = [Coordinates(lat=p["lat"], lng=p["lng"]) for p in gov_land_raw]
+@router.post("/analyze", response_model=AnalysisResponse, summary="Run a screening pond analysis")
+async def analyze_location(payload: AnalysisRequest, http_request: Request) -> AnalysisResponse:
+    await limiter.enforce(http_request, "analyze", settings.rate_analyze_per_minute)
+    if payload.radius_km > settings.analysis_max_radius_km:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "radius_not_supported",
+                "message": f"Maximum configured analysis radius is {settings.analysis_max_radius_km:g} km",
+            },
+        )
+
+    elevation_task = asyncio.create_task(
+        fetch_elevation_grid(payload.center.lat, payload.center.lng, payload.radius_km)
+    )
+    imagery_task = asyncio.create_task(
+        download_satellite_mosaic(payload.center.lat, payload.center.lng, payload.radius_km)
+    )
+    rainfall_task = asyncio.create_task(
+        get_rainfall_data(payload.center.lat, payload.center.lng)
+    )
+    try:
+        elevation_result = await elevation_task
+    except Exception as elevation_error:
+        imagery_task.cancel()
+        rainfall_task.cancel()
+        await asyncio.gather(imagery_task, rainfall_task, return_exceptions=True)
+        message = (
+            elevation_error.message
+            if isinstance(elevation_error, UpstreamDataError)
+            else "Elevation processing failed"
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "elevation_unavailable", "message": message},
+        ) from elevation_error
+    imagery_result, rainfall_result = await asyncio.gather(
+        imagery_task, rainfall_task, return_exceptions=True
+    )
+
+    warnings = [
+        "Screening result only: cadastral ownership, hydrogeology, soils, groundwater, structures, utilities and field conditions are not verified."
+    ]
+    sources: dict[str, SourceMetadata] = {"elevation": _source_model(elevation_result.source)}
+    if elevation_result.source.message:
+        warnings.append(elevation_result.source.message)
+    candidate_polygon_raw: list[dict] = []
+    land_result: LandCoverResult | None = None
+
+    if isinstance(imagery_result, Exception):
+        message = imagery_result.message if isinstance(imagery_result, UpstreamDataError) else "Satellite imagery processing failed"
+        sources["imagery"] = _unavailable_source(settings.imagery_source_name, message)
+        sources["land_cover"] = _unavailable_source("RGB/HSV land-cover screening", "No valid imagery was available")
+        warnings.append(message)
     else:
-        offset = 0.003
-        gov_land_polygon = [
-            Coordinates(lat=pond_lat - offset, lng=pond_lng - offset),
-            Coordinates(lat=pond_lat - offset, lng=pond_lng + offset),
-            Coordinates(lat=pond_lat + offset, lng=pond_lng + offset),
-            Coordinates(lat=pond_lat + offset, lng=pond_lng - offset),
-        ]
+        sources["imagery"] = _source_model(imagery_result.source)
+        try:
+            land_result = await asyncio.to_thread(analyze_satellite_image, imagery_result.image)
+            if land_result.candidate_contour is not None:
+                candidate_polygon_raw = contour_to_polygon(
+                    land_result.candidate_contour, imagery_result.bounds, imagery_result.image.shape
+                )
+            land_source = SourceInfo(
+                name="RGB/HSV land-cover screening",
+                status="degraded",
+                resolution=imagery_result.source.resolution,
+                coverage_ratio=imagery_result.source.coverage_ratio,
+                message=land_result.message,
+            )
+            sources["land_cover"] = _source_model(land_source)
+            warnings.append(land_result.message)
+        except Exception as exc:
+            sources["land_cover"] = _unavailable_source(
+                "RGB/HSV land-cover screening", f"Land-cover analysis failed: {type(exc).__name__}"
+            )
+            warnings.append("Land-cover analysis failed; no land candidate or pond location was produced.")
 
-    land_analysis = LandAnalysis(barren_ratio=barren_ratio, adjusted_runoff_coeff=adjusted_c)
-
-    # ── Step 5: Runoff calculation ─────────────────────────────
-    logger.info("Step 5: Calculating runoff (C=%.3f, A=%.0f m², P=%.1f mm)...", adjusted_c, catchment_area_sqm, annual_rainfall_mm)
-    volume_m3 = calculate_runoff(catchment_area_sqm, annual_rainfall_mm, adjusted_c)
-
-    runoff_stats = RunoffStats(
-        catchment_area_sqm=round(catchment_area_sqm, 2),
-        annual_rainfall_mm=annual_rainfall_mm,
-        runoff_coefficient=adjusted_c,
-        estimated_volume_m3=round(volume_m3, 2),
-    )
-
-    # ── Step 6: Pond sizing ────────────────────────────────────
-    logger.info("Step 6: Recommending pond dimensions...")
-    depth, capacity, surface_area = recommend_pond_dimensions(volume_m3)
-
-    pond = PondRecommendation(
-        lat=pond_lat,
-        lng=pond_lng,
-        depth_m=depth,
-        capacity_m3=capacity,
-        surface_area_sqm=surface_area,
-    )
-
-    # ── Step 7: Save to database ───────────────────────────────
-    logger.info("Step 7: Saving to database...")
-    db_analysis = PondAnalysis(
-        village_name=request.village_name,
-        center_lat=lat,
-        center_lng=lng,
-        min_elevation=elev_stats["min_elevation"],
-        max_elevation=elev_stats["max_elevation"],
-        mean_elevation=elev_stats["mean_elevation"],
-        relief=elev_stats["relief"],
-        catchment_area_sqm=runoff_stats.catchment_area_sqm,
-        annual_rainfall_mm=runoff_stats.annual_rainfall_mm,
-        runoff_coefficient=runoff_stats.runoff_coefficient,
-        estimated_volume_m3=runoff_stats.estimated_volume_m3,
-        barren_ratio=barren_ratio,
-        pond_lat=pond.lat,
-        pond_lng=pond.lng,
-        depth_m=pond.depth_m,
-        capacity_m3=pond.capacity_m3,
-        surface_area_sqm=pond.surface_area_sqm,
-        catchment_polygon=[p.model_dump() for p in catchment_polygon],
-        government_land_polygon=[p.model_dump() for p in gov_land_polygon],
-        contours=[c.model_dump() for c in contours],
-        monthly_rainfall=[m.model_dump() for m in monthly_rainfall],
-    )
+    if isinstance(rainfall_result, Exception):
+        message = rainfall_result.message if isinstance(rainfall_result, UpstreamDataError) else "Rainfall processing failed"
+        sources["rainfall"] = _unavailable_source("Historical rainfall", message)
+        warnings.append(message)
+        rainfall_data = RainfallData()
+    else:
+        sources["rainfall"] = _source_model(rainfall_result.source)
+        rainfall_data = RainfallData(
+            annual_avg_mm=rainfall_result.annual_avg_mm,
+            valid_years=rainfall_result.valid_years,
+            monthly=[MonthlyRainfall(**item) for item in rainfall_result.monthly],
+        )
 
     try:
-        db.add(db_analysis)
-        db.commit()
-        db.refresh(db_analysis)
-        logger.info("Analysis saved with id=%d", db_analysis.id)
-    except Exception as exc:
-        logger.error("Failed to save to database: %s", exc)
-        db.rollback()
+        terrain = await asyncio.to_thread(
+            run_terrain_analysis,
+            elevation_result.dem,
+            elevation_result.latitudes,
+            elevation_result.longitudes,
+            candidate_polygon_raw,
+        )
+    except AnalysisValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "terrain_quality_failed", "message": str(exc)},
+        ) from exc
+    warnings.extend(terrain["warnings"])
+    terrain_status = "degraded" if terrain["warnings"] else "reliable"
+    sources["hydrology"] = _source_model(SourceInfo(
+        name="Priority-flood + D8 watershed screening",
+        status=terrain_status,
+        resolution=f"{elevation_result.cell_size_m:.1f} m analysis cells",
+        message="; ".join(terrain["warnings"]) or None,
+    ))
 
-    logger.info("=== Analysis complete ===")
+    coefficient = settings.approved_runoff_coefficient
+    coefficient_basis = settings.approved_runoff_coefficient_source
+    if coefficient is None:
+        sources["runoff_coefficient"] = _unavailable_source(
+            "Approved runoff coefficient",
+            "No field- or authority-approved runoff coefficient is configured",
+        )
+        warnings.append(
+            "Annual runoff and pond sizing are unavailable until an approved runoff coefficient and its basis are configured."
+        )
+    else:
+        sources["runoff_coefficient"] = _source_model(SourceInfo(
+            name="Configured runoff coefficient",
+            status="reliable" if coefficient_basis else "degraded",
+            model=coefficient_basis,
+            message=f"Configured coefficient: {coefficient:g}",
+        ))
+    annual_rainfall = rainfall_data.annual_avg_mm
+    volume = None
+    peak_discharge = None
+    if coefficient is not None and annual_rainfall is not None:
+        volume = calculate_runoff(terrain["catchment_area_sqm"], annual_rainfall, coefficient)
+        warnings.append(
+            "Annual runoff is a screening water-yield estimate; evaporation, infiltration, sediment reserve, routing and environmental releases are not modelled."
+        )
+        if settings.design_rainfall_intensity_mm_h is not None:
+            peak_discharge = calculate_peak_discharge(
+                terrain["catchment_area_sqm"], settings.design_rainfall_intensity_mm_h, coefficient
+            )
+        else:
+            warnings.append("Peak discharge is unavailable because no approved design rainfall intensity is configured.")
 
+    pond = None
+    if volume is not None and terrain["pond_location"] is not None:
+        try:
+            geometry = recommend_pond_geometry(volume, terrain["candidate_area_sqm"])
+            pond = PondRecommendation(
+                lat=terrain["pond_location"]["lat"],
+                lng=terrain["pond_location"]["lng"],
+                **geometry,
+            )
+            if geometry["constrained_by_available_area"]:
+                warnings.append("Pond capacity was reduced to fit the detected bare-surface candidate area.")
+        except AnalysisValidationError as exc:
+            warnings.append(str(exc))
+    elif terrain["pond_location"] is None:
+        warnings.append("No pond location is reported because no detected bare-surface candidate overlaps the watershed.")
+    else:
+        warnings.append("No pond dimensions are reported because rainfall or runoff-coefficient evidence is unavailable.")
+
+    statuses = [source.status for source in sources.values()]
+    if pond is None or "unavailable" in statuses:
+        analysis_status = "incomplete"
+    elif "degraded" in statuses or warnings:
+        analysis_status = "degraded"
+    else:
+        analysis_status = "complete"
+
+    catchment_polygon = [Coordinates(**point) for point in terrain["catchment_polygon"]]
+    candidate_polygon = [Coordinates(**point) for point in candidate_polygon_raw]
+    contours = [
+        ContourLine(
+            elevation=item["elevation"],
+            points=[Coordinates(**point) for point in item["points"]],
+        )
+        for item in terrain["contours"]
+    ]
+    elevation_stats = ElevationStats(**terrain["elevation_stats"])
+    land_analysis = LandAnalysis(
+        status=land_result.status if land_result else "unavailable",
+        bare_surface_ratio=land_result.bare_surface_ratio if land_result else None,
+        vegetation_ratio=land_result.vegetation_ratio if land_result else None,
+        water_ratio=land_result.water_ratio if land_result else None,
+        low_saturation_surface_ratio=land_result.low_saturation_surface_ratio if land_result else None,
+        candidate_area_sqm=round(terrain["candidate_area_sqm"], 2) if candidate_polygon else None,
+    )
+    runoff_stats = RunoffStats(
+        catchment_area_sqm=round(terrain["catchment_area_sqm"], 2),
+        annual_rainfall_mm=annual_rainfall,
+        runoff_coefficient=coefficient,
+        runoff_coefficient_basis=coefficient_basis,
+        estimated_volume_m3=round(volume, 2) if volume is not None else None,
+        peak_discharge_m3_s=round(peak_discharge, 4) if peak_discharge is not None else None,
+        peak_method="Rational Method using configured design intensity" if peak_discharge is not None else None,
+    )
+
+    persistence = PersistenceStatus(status="disabled", message="History storage is disabled")
+    if settings.history_enabled:
+        values = {
+            "analysis_status": analysis_status,
+            "village_name": payload.village_name,
+            "center_lat": payload.center.lat,
+            "center_lng": payload.center.lng,
+            "min_elevation": elevation_stats.min_elevation,
+            "max_elevation": elevation_stats.max_elevation,
+            "mean_elevation": elevation_stats.mean_elevation,
+            "relief": elevation_stats.relief,
+            "catchment_area_sqm": runoff_stats.catchment_area_sqm,
+            "annual_rainfall_mm": annual_rainfall,
+            "runoff_coefficient": coefficient,
+            "estimated_volume_m3": runoff_stats.estimated_volume_m3,
+            "bare_surface_ratio": land_analysis.bare_surface_ratio,
+            "pond_lat": pond.lat if pond else None,
+            "pond_lng": pond.lng if pond else None,
+            "depth_m": pond.water_depth_m if pond else None,
+            "capacity_m3": pond.capacity_m3 if pond else None,
+            "surface_area_sqm": pond.excavation_footprint_area_sqm if pond else None,
+            "catchment_polygon": [point.model_dump() for point in catchment_polygon],
+            "candidate_land_polygon": [point.model_dump() for point in candidate_polygon],
+            "contours": [item.model_dump() for item in contours],
+            "monthly_rainfall": [item.model_dump() for item in rainfall_data.monthly],
+            "source_metadata": {
+                key: value.model_dump(mode="json") for key, value in sources.items()
+            },
+            "warnings": warnings,
+        }
+        try:
+            record_id = await asyncio.to_thread(save_analysis, values)
+            persistence = PersistenceStatus(status="saved", record_id=record_id)
+        except Exception as exc:
+            logger.warning("analysis_persistence_failed error_type=%s", type(exc).__name__)
+            persistence = PersistenceStatus(status="failed", message="Analysis completed but could not be saved")
+            warnings.append("Analysis history could not be saved.")
+
+    quality = AnalysisQuality(
+        status=analysis_status,
+        sources=sources,
+        warnings=list(dict.fromkeys(warnings)),
+    )
     return AnalysisResponse(
+        analysis_status=analysis_status,
+        quality=quality,
         pond=pond,
         runoff_stats=runoff_stats,
-        government_land_polygon=gov_land_polygon,
+        candidate_land_polygon=candidate_polygon,
         catchment_polygon=catchment_polygon,
         contours=contours,
         elevation_stats=elevation_stats,
         rainfall_data=rainfall_data,
         land_analysis=land_analysis,
+        persistence=persistence,
     )
 
 
-@router.get("/search-village", response_model=List[VillageSearchResult], summary="Search for a village by name")
-async def search_village_endpoint(q: str = Query(..., description="Village or place name to search")):
-    """
-    Geocode a village name using the Nominatim (OpenStreetMap) API.
-    Returns up to 5 matching locations with their coordinates.
-    """
-    results = await search_village(q)
-    return [VillageSearchResult(**r) for r in results]
+@router.get("/search-village", response_model=List[VillageSearchResult], summary="Search for a place after explicit submission")
+async def search_village_endpoint(
+    request: Request,
+    q: str = Query(..., min_length=2, max_length=120),
+) -> list[VillageSearchResult]:
+    await limiter.enforce(request, "search", settings.rate_search_per_minute)
+    try:
+        results = await search_village(q)
+    except UpstreamDataError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "geocoding_unavailable", "message": exc.message},
+        ) from exc
+    return [VillageSearchResult(**result) for result in results]
 
 
-@router.get("/history", response_model=List[HistoryItem], summary="Get past analysis records")
-async def get_history(db: Session = Depends(get_db), limit: int = Query(20, le=100)):
-    """
-    Retrieve the most recent analysis records from the database.
-    """
-    records = (
-        db.query(PondAnalysis)
-        .order_by(PondAnalysis.created_at.desc())
-        .limit(limit)
-        .all()
-    )
+def _authorize_history(api_key: str | None) -> None:
+    if not settings.history_enabled:
+        raise HTTPException(status_code=404, detail={"code": "history_disabled", "message": "Analysis history is disabled"})
+    if settings.history_api_key and not hmac.compare_digest(api_key or "", settings.history_api_key):
+        raise HTTPException(status_code=401, detail={"code": "unauthorized", "message": "A valid history API key is required"})
+
+
+@router.get("/history", response_model=List[HistoryItem], summary="Get protected analysis history")
+async def get_history(
+    request: Request,
+    limit: int = Query(20, ge=1, le=100),
+    x_api_key: str | None = Header(None, alias="X-API-Key"),
+) -> list[HistoryItem]:
+    await limiter.enforce(request, "history", settings.rate_history_per_minute)
+    _authorize_history(x_api_key)
+    try:
+        records = await asyncio.to_thread(fetch_history, limit)
+    except Exception as exc:
+        logger.warning("history_query_failed error_type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail={"code": "history_unavailable", "message": "History storage is unavailable"}) from exc
     return [
         HistoryItem(
-            id=r.id,
-            created_at=r.created_at.isoformat() if r.created_at else "",
-            center_lat=r.center_lat,
-            center_lng=r.center_lng,
-            village_name=r.village_name,
-            catchment_area_sqm=r.catchment_area_sqm,
-            annual_rainfall_mm=r.annual_rainfall_mm,
-            estimated_volume_m3=r.estimated_volume_m3,
-            pond_depth_m=r.depth_m,
-            pond_capacity_m3=r.capacity_m3,
+            id=record.id,
+            created_at=record.created_at,
+            center_lat=record.center_lat,
+            center_lng=record.center_lng,
+            village_name=record.village_name,
+            analysis_status=record.analysis_status,
+            catchment_area_sqm=record.catchment_area_sqm,
+            annual_rainfall_mm=record.annual_rainfall_mm,
+            estimated_volume_m3=record.estimated_volume_m3,
+            pond_depth_m=record.depth_m,
+            pond_capacity_m3=record.capacity_m3,
         )
-        for r in records
+        for record in records
     ]

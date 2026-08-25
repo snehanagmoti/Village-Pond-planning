@@ -1,268 +1,372 @@
-# Final Technical Report: AI-based Village Pond Planning System
+# AI-based Village Pond Planning System
 
----
+## Final Technical Report
 
-## 1. Introduction
+**Student:** Sneha Nagmoti
 
-Water conservation is a critical challenge in rural India, where communities depend heavily on monsoon rainfall for agriculture and domestic use. One proven solution is the construction of percolation ponds at strategic locations to harvest and store rainwater. However, selecting the optimal site requires analysis of terrain elevation, drainage patterns, catchment area, land availability, and historical rainfall — tasks traditionally done manually with significant effort and expertise.
+**Assignment:** Assignment 1
 
-This project presents an **AI-driven, full-stack web application** that automates the site selection process. Given a user-selected village location, the system fetches real geospatial data, performs hydrological modelling, analyses satellite imagery for land suitability, and recommends pond dimensions — all through an interactive map-based interface.
+**Submission phase:** Phase 3 - Final implementation and demonstration
 
----
+**Date:** 26 August 2026
 
-## 2. System Architecture
+**Repository:** https://github.com/snehanagmoti/Village-Pond-planning
 
-The system follows a **three-tier client-server architecture**:
+## 1. Abstract
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        FRONTEND (React + Vite)                      │
-│  ┌──────────┐  ┌──────────┐  ┌────────────┐  ┌─────────────────┐  │
-│  │ SearchBar│  │ MapView  │  │ StatsPanel │  │ RainfallChart   │  │
-│  │(Nominatim│  │(Leaflet) │  │ (Sidebar)  │  │ (SVG bar chart) │  │
-│  └────┬─────┘  └────┬─────┘  └──────┬─────┘  └────────┬────────┘  │
-│       └──────────────┴───────────────┴─────────────────┘            │
-│                              │  HTTP/JSON                           │
-├──────────────────────────────┼──────────────────────────────────────┤
-│                        BACKEND (FastAPI)                            │
-│  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌────────────────┐  │
-│  │ Elevation │  │  Terrain  │  │ Rainfall  │  │  CV Analyzer   │  │
-│  │ Service   │  │  Service  │  │ Service   │  │  (OpenCV)      │  │
-│  │(Open-Meteo│  │ (D8/BFS)  │  │(Open-Meteo│  │  (HSV thresh)  │  │
-│  │ Elev API) │  │           │  │ Archive)  │  │                │  │
-│  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └───────┬────────┘  │
-│        └──────────────┴──────────────┴────────────────┘            │
-│                              │  SQLAlchemy ORM                      │
-├──────────────────────────────┼──────────────────────────────────────┤
-│                        DATABASE (PostgreSQL)                        │
-│                    ┌─────────────────────────┐                      │
-│                    │    pond_analysis table   │                      │
-│                    │  (JSON columns for       │                      │
-│                    │   polygons & contours)   │                      │
-│                    └─────────────────────────┘                      │
-└─────────────────────────────────────────────────────────────────────┘
-```
+This project implements a web-based decision-support system for preliminary
+village pond planning. It provides two connected workflows. The Phase 2 workflow
+accepts an arbitrary KML/KMZ contour map, reconstructs a terrain grid from the
+uploaded geometry, identifies a hydrologically strong candidate point, and
+delineates its contributing catchment. The complete application also supports a
+location-based workflow that combines satellite imagery, elevation, historical
+rainfall, surface screening, D8 hydrology, runoff estimation, and approximate
+pond geometry in an interactive map.
 
-### 2.1 Frontend
-- **React 19** with Vite for fast development builds
-- **react-leaflet** with Esri World Imagery satellite tiles for the interactive map
-- **Component-based architecture**: `SearchBar`, `MapLegend`, `RainfallChart` components
-- **Vanilla CSS** with a dark glassmorphism design system using CSS custom properties
+The implementation is deliberately transparent about uncertainty. Results carry
+source provenance, quality status, limitations, and a screening-only flag. The
+software does not claim government ownership, legal land availability, surveyed
+terrain accuracy, or construction safety. Those decisions require cadastral
+records, field survey, soil and groundwater investigation, qualified engineering
+design, and statutory approval.
 
-### 2.2 Backend
-- **FastAPI** RESTful service with 3 endpoints (`/analyze`, `/search-village`, `/history`)
-- **Service-oriented architecture**: independent modules for elevation, terrain, rainfall, CV analysis, and geocoding
-- **Structured logging** throughout the analysis pipeline for debugging
+## 2. Requirement traceability
 
-### 2.3 Database
-- **PostgreSQL** with SQLAlchemy ORM
-- JSON columns for complex spatial data (polygons, contour lines, monthly rainfall)
-- Environment-variable-based configuration via `python-dotenv`
+| Assignment requirement | Implemented evidence |
+| --- | --- |
+| Satellite imagery | Leaflet satellite base map and bounded imagery mosaic service |
+| Contour visualization | Live DEM contour overlays and uploaded contour study boundary |
+| Suitable/available land | Conservative bare-surface candidate; ownership explicitly unverified |
+| Catchment area | Priority-flood conditioning, D8 routing, reverse catchment traversal, area in ha |
+| Historical rainfall | Configurable 1991-2025 ERA5-Land daily data aggregated by complete year |
+| Runoff volume | `V = C x A x P` with visible coefficient and documentary basis |
+| Pond depth/capacity | Side-sloped rectangular-frustum screening geometry with freeboard |
+| Selected point and maps | Leaflet point, catchment, study area, candidate land and contour layers |
+| KML/KMZ backend route | `POST /api/analyze-contour` plus assignment-compatible aliases |
+| Structured result | Strict Pydantic JSON models, stable errors and OpenAPI documentation |
+| Generalized implementation | All locations, geometry, elevations and outputs derived from input |
+| Accessible frontend | Responsive keyboard-friendly React UI with explicit status/warnings |
+| Installation/API docs | README, `docs/API.md`, `docs/DEPLOYMENT.md`, Swagger and ReDoc |
+| Testing/code quality | Automated unit/API/UI tests, lint, coverage, audits, migrations and builds |
 
----
+## 3. System architecture
 
-## 3. Methodology & Algorithms
+The browser client is a Vite/React single-page application using Leaflet for map
+display. It sends either a multipart contour upload or a location/radius JSON
+request to a FastAPI backend. Axios cancellation and a monotonically increasing
+request sequence prevent stale responses from replacing newer analysis.
 
-### 3.1 Elevation Data Acquisition
+FastAPI validates all public contracts with Pydantic and delegates geospatial
+work to independent services. Uploaded contours pass through a safe parser,
+terrain-grid reconstruction, and the shared hydrology pipeline. Location analysis
+uses independent elevation, rainfall, imagery, geocoding, terrain, runoff, and
+pond modules. CPU-heavy OpenCV and terrain work runs outside the asynchronous
+event loop.
 
-The system fetches a real **Digital Elevation Model (DEM)** from the **Open-Meteo Elevation API**, which provides SRTM-based elevation data at approximately **90-metre resolution** worldwide. For each analysis:
+PostgreSQL history is optional and disabled by default because it stores precise
+locations. When enabled, history requires an API key, bounded queries, Alembic
+migrations, and non-default credentials.
 
-- A 25×25 grid of geographic points is generated within a 2 km radius of the selected location
-- Elevation values are fetched in batches of 100 via HTTP (respecting API rate limits)
-- NaN values (e.g., over water) are filled using neighbour-averaged interpolation
+```text
+React / Leaflet
+  |-- KML/KMZ multipart --> FastAPI --> safe parser --> interpolated DEM
+  |                                              `--> D8 catchment JSON
+  `-- location + radius --> FastAPI --> elevation + rainfall + imagery
+                                                 `--> runoff + pond screen
 
-This produces a real elevation grid that drives all subsequent hydrological analysis.
-
-### 3.2 D8 Flow Direction Algorithm
-
-The **D8 (deterministic eight-neighbour)** algorithm is the foundation of the hydrological analysis. For each interior cell in the DEM:
-
-1. Examine all 8 neighbours (N, NE, E, SE, S, SW, W, NW)
-2. Compute the slope to each neighbour: `slope = (elev_current − elev_neighbour) / distance`
-   - Cardinal distance = 1 cell, diagonal = √2 cells
-3. Assign the flow direction to the **steepest descent** neighbour
-4. If no neighbour is lower, mark the cell as a **pit** (potential outlet)
-
-**Time complexity**: O(n) where n = number of grid cells.
-
-### 3.3 Flow Accumulation (Topological Sort)
-
-Flow accumulation counts the number of upstream cells draining through each point. This is computed using **Kahn's algorithm** (topological sort on the D8 flow graph):
-
-1. Build an in-degree array: for each cell, count how many cells flow into it
-2. Seed a queue with all cells having in-degree = 0 (headwater cells)
-3. Process cells in topological order, propagating each cell's accumulation to its downstream neighbour
-
-The cell with the **highest accumulation** becomes the **pour point** (drainage outlet) for watershed delineation.
-
-### 3.4 Watershed Delineation (Reverse BFS)
-
-From the pour point, a **reverse breadth-first search** identifies all cells that drain to it:
-
-1. Start at the pour point, mark it as part of the catchment
-2. For each marked cell, check all 8 neighbours
-3. If a neighbour's flow direction points *toward* the current cell (i.e., it is upstream), mark it and enqueue it
-4. Continue until no more upstream cells are found
-
-The result is a boolean mask representing the **catchment area** — all land whose rainfall eventually flows to the pour point.
-
-### 3.5 Contour Line Extraction
-
-Contour lines are extracted from the real DEM using OpenCV:
-
-1. **Upscale** the 25×25 DEM to 200×200 using bilinear interpolation for smoother lines
-2. **Gaussian blur** to remove grid artefacts
-3. For each elevation level (6 evenly-spaced levels between min and max):
-   - Binary threshold the DEM at that level
-   - Run `cv2.findContours` to extract iso-elevation boundaries
-   - Simplify using `cv2.approxPolyDP` (Ramer-Douglas-Peucker algorithm)
-4. Convert pixel coordinates back to geographic lat/lng
-
-### 3.6 Catchment Area Calculation (Shoelace Formula)
-
-The catchment boundary polygon's area is computed using the **Shoelace formula**:
-
-1. Project lat/lng coordinates to a local Cartesian system (metres) using the cosine correction:
-   - `x = (lng − avg_lng) × 111320 × cos(avg_lat)`
-   - `y = (lat − avg_lat) × 111320`
-2. Apply the Shoelace formula: `A = ½ |Σ(xᵢyᵢ₊₁ − xᵢ₊₁yᵢ)|`
-
-This is accurate for areas under ~50 km where Earth curvature is negligible.
-
-### 3.7 OpenCV Satellite Image Analysis
-
-The system downloads a satellite tile from the Esri World Imagery server and runs computer vision analysis:
-
-1. Convert the BGR image to **HSV colour space**
-2. Apply three colour range thresholds:
-   - Brown/tan (H: 8–30, S: 30–255, V: 50–255) — ploughed/bare soil
-   - Grey/dry (H: 0–180, S: 0–50, V: 80–200) — rocky/dry ground
-   - Sandy (H: 15–35, S: 20–150, V: 120–255) — sandy terrain
-3. Combine masks using bitwise OR
-4. Apply **morphological close** (fill small gaps) and **open** (remove noise) with an elliptical kernel
-5. Calculate the **barren ratio** = barren pixels / total pixels
-6. Extract the largest barren contour as the "available land" polygon
-7. **Adjust the runoff coefficient**: `C = 0.15 + barren_ratio × 0.40`
-   - Fully vegetated (0% barren) → C = 0.15
-   - Fully barren (100%) → C = 0.55
-
-#### 3.7.1 Government / Available Land Identification
-
-The assignment requires identifying "available land suitable for pond excavation" (Requirement 3). In practice, government land records for Indian villages are maintained by state revenue departments and are **not available via any free, publicly accessible API**. Therefore, this system uses **barren/unused land detected via satellite image analysis as a proxy** for potentially available excavation sites. The rationale is:
-
-- Barren, unvegetated land is more likely to be common/waste land (often government-owned in Indian villages)
-- Such land has no standing crops or structures, making it practically suitable for excavation
-- The detected barren polygon is displayed on the map as "Available Land (Detected via CV)" so the user can cross-reference with local land records
-
-This approach is consistent with how remote sensing is used in real-world rural planning — satellite-based land-use classification serves as a first screening tool before ground verification with official records.
-
-
-
-### 3.8 Historical Rainfall Integration
-
-Historical precipitation data for 2013–2023 (11 years) is queried from the **Open-Meteo Archive API**:
-
-- Daily precipitation sums are aggregated by month across all years
-- Monthly averages are computed by dividing each month's total by 11
-- The annual average is the sum of all 12 monthly averages
-- A fallback monsoon distribution is provided if the API is unreachable
-
-### 3.9 Runoff Estimation (Rational Method)
-
-Annual runoff volume is estimated using the **Rational Method**:
-
-```
-V = C × A × P
+Optional protected history -------------------------------> PostgreSQL
 ```
 
-Where:
-- **V** = Runoff volume (m³)
-- **C** = Runoff coefficient (from OpenCV land analysis, typically 0.15–0.55)
-- **A** = Catchment area (m²) (from Shoelace formula on watershed polygon)
-- **P** = Annual rainfall depth (m) (from Open-Meteo historical average)
+## 4. Phase 2 contour-file analysis
 
-### 3.10 Pond Dimension Recommendation
+### 4.1 Input and validation
 
-Based on the estimated runoff volume:
+The canonical route is `POST /api/analyze-contour`; the multipart field name is
+`contour_file`. Hidden compatibility aliases `/api/analyzeContour` and
+`/api/findCatchment` accept the same request. The route reads at most the
+configured 15 MiB plus one byte, closes the temporary upload, and runs CPU work
+in a worker thread.
 
-1. **Capture efficiency**: Target 80% of annual runoff
-2. **Depth selection**: Continuous interpolation between 2.0m (< 5000 m³) and 4.0m (> 50000 m³)
-3. **Surface area**: `A = Capacity / Depth`
-4. **Location**: Placed at the **lowest elevation point** within the catchment (found from the DEM)
+The parser supports plain KML and KMZ. It obtains a line elevation, in order,
+from a numeric Placemark name, an elevation-like `Data` or `SimpleData` field,
+or a constant altitude coordinate. It accepts namespace variants and
+`MultiGeometry` because it traverses Placemark geometry recursively.
 
----
+Validation rejects malformed XML, DTD/entity declarations, invalid coordinates,
+encrypted archives, unsafe compression ratios, too many archive entries, large
+expanded KMZ content, excessive contour/point counts, fewer than three lines or
+levels, and less than 0.5 m total relief. An uploaded polygon supplies a study
+boundary; otherwise a buffered convex hull is derived from the input contours.
 
-## 4. External APIs Used
+### 4.2 Terrain reconstruction
 
-All APIs are **completely free** with no API keys required:
+KML stores vector isolines rather than a complete elevation raster. The service
+projects the study extent to a latitude-corrected metric grid. Grid dimensions
+are selected from input extent and contour interval, then bounded by
+configuration. Each contour is rasterized into fixed observed cells. Unknown
+interior cells are initialized from neighboring observations and solved by
+iterative harmonic interpolation while observed values remain fixed. The result
+records observed-cell ratio, iteration count, convergence, cell size, and method.
 
-| API | Purpose | Rate Limits |
-|:----|:--------|:------------|
-| Open-Meteo Elevation | DEM grid (~90m SRTM) | Generous, ~100 req/min |
-| Open-Meteo Archive | 11-year daily precipitation | Generous, ~100 req/min |
-| Nominatim (OpenStreetMap) | Village name geocoding | 1 req/sec |
-| Esri World Imagery | Satellite tiles (map + CV input) | Fair use |
+The study boundary masks both interpolation and later hydrology so cells outside
+the uploaded domain cannot become part of the catchment. Results are always
+labelled `degraded`, even on successful convergence, because an interpolated
+surface is not equivalent to a surveyed DEM.
 
----
+### 4.3 Hydrology and candidate selection
 
-## 5. Frontend Design
+The shared deterministic pipeline performs:
 
-The frontend uses a **dark glassmorphism** design with:
+1. finite grid and analysis-mask validation;
+2. priority-flood depression filling;
+3. a very small deterministic gradient for equal-elevation flats;
+4. steepest lower-neighbor D8 flow direction;
+5. topological upstream flow accumulation;
+6. candidate selection by maximum contributing area, with lower elevation as
+   the tie-breaker;
+7. reverse graph traversal to collect all cells draining to that candidate;
+8. latitude-corrected catchment-area calculation; and
+9. simplified WGS84 boundary extraction for JSON and Leaflet.
 
-- Full-screen satellite map with interactive click-to-analyse
-- **Village search bar** with debounced geocoding and dropdown results
-- **Statistics dashboard** with categorised panels: Elevation, Hydrology, Land Cover
-- **Monthly rainfall bar chart** (pure SVG, no external charting library)
-- **Map legend** overlay explaining all layer colours
-- **Contour tooltips** showing elevation values on hover
-- Responsive layout adapting to mobile viewports
+No sample coordinate, candidate point, catchment boundary, area, or expected
+elevation is stored in the implementation.
 
----
+### 4.4 Provided-map result
 
-## 6. Database Schema
+The supplied `contours_1m.kml` was processed through the real service code on 26
+August 2026. The measured output was:
 
-```sql
-CREATE TABLE pond_analysis (
-    id              SERIAL PRIMARY KEY,
-    created_at      TIMESTAMP DEFAULT NOW(),
-    village_name    VARCHAR,
-    center_lat      FLOAT NOT NULL,
-    center_lng      FLOAT NOT NULL,
-    min_elevation   FLOAT,
-    max_elevation   FLOAT,
-    mean_elevation  FLOAT,
-    relief          FLOAT,
-    catchment_area_sqm FLOAT,
-    annual_rainfall_mm FLOAT,
-    runoff_coefficient FLOAT,
-    estimated_volume_m3 FLOAT,
-    barren_ratio    FLOAT,
-    pond_lat        FLOAT,
-    pond_lng        FLOAT,
-    depth_m         FLOAT,
-    capacity_m3     FLOAT,
-    surface_area_sqm FLOAT,
-    catchment_polygon   JSON,
-    government_land_polygon JSON,
-    contours        JSON,
-    monthly_rainfall JSON
-);
-```
+| Metric | Result |
+| --- | ---: |
+| Contour LineStrings | 1,355 |
+| Source vertices | 159,113 |
+| Distinct elevation levels | 32 |
+| Elevation range | 267.0-298.0 m |
+| Median contour interval | 1.0 m |
+| Analysis grid | 148 x 181 |
+| Cell size | 18.0 m |
+| Directly observed analysis cells | 85.206% |
+| Harmonic iterations | 31, converged |
+| Candidate coordinate | 21.239822, 81.286438 |
+| Candidate interpolated elevation | 271.323 m |
+| Modelled catchment | 3,921,224.77 m2 / 392.1225 ha |
+| Catchment cells | 12,103 |
+| Catchment share of study grid | 46.386% |
 
----
+These figures demonstrate the working algorithm on the provided map; they are
+not a field-verified pond recommendation.
 
-## 7. Evaluation and Results
+## 5. Location-based elevation and hydrology
 
-The system was tested with multiple Indian village locations:
+The location workflow requests WGS84 elevation points through Open-Meteo. The
+documented source is Copernicus DEM 2021 GLO-90. Grid density is radius-aware and
+targets approximately 90 m cells, subject to configured limits. The public API
+path is capped at 23 x 23 locations to remain below its public request allowance;
+the response is marked degraded when this cap is coarser than the target.
 
-- **Terrain analysis** correctly identifies topographic depressions and drainage patterns from real SRTM elevation data
-- **Contour lines** align with the actual elevation gradient visible on satellite imagery
-- **Rainfall values** match published IMD statistics for the test regions
-- **OpenCV barren-land detection** successfully distinguishes agricultural/barren land from forested/vegetated areas
-- **Pond recommendations** place the pond at the lowest point in the catchment — the natural drainage outlet
+Every batch is checked for matching length, numeric range, finite coverage, and
+final shape. The system does not fill a failed batch with synthetic terrain. A
+small percentage of isolated missing cells can be locally interpolated, while
+larger missing regions make elevation unavailable.
 
----
+Priority-flood, D8, accumulation, catchment traversal, area calculation, and
+boundary extraction match the contour workflow. A radius is the half-width of
+the square grid, not proof that the full upstream catchment lies inside it.
+Roads, culverts, irrigation channels, breached embankments, structures, and DEM
+vertical error can materially change real drainage.
 
-## 8. Conclusion
+## 6. Rainfall analysis
 
-By combining Python's robust data science ecosystem (NumPy, OpenCV, httpx) with modern web technologies (React, Leaflet, FastAPI, PostgreSQL), this application provides a complete, data-driven tool for village pond planning. All geospatial algorithms operate on real elevation and satellite data, and all external services are freely available — making the system practical for deployment in resource-constrained rural settings.
+The default period is 1991-2025 and the default model is ERA5-Land. This is a
+reanalysis product, not a village rain gauge. Daily non-negative precipitation
+is grouped by calendar year. Only years containing every expected day are used,
+so missing dates cannot reduce a total as if they were zero rainfall. Monthly
+means include the number of contributing complete years, and source status
+depends on the configured minimum valid-year threshold.
+
+Mean annual rainfall supports screening water yield. It is not a design storm
+and cannot size a spillway or establish flood safety.
+
+## 7. Satellite surface screening and land limits
+
+The imagery service downloads all tiles needed for the selected extent and
+rejects missing, malformed, blank, low-contrast, or inconsistent images. Zoom is
+radius-aware to bound network work and memory. Provider name, retrieval time,
+approximate resolution, source status, and terms link are returned.
+
+OpenCV screens broad HSV/RGB classes for vegetation, water-like pixels, brown or
+sandy surface, and low-saturation surface. Morphological cleanup removes small
+noise. The largest qualifying region becomes a **bare-surface candidate**, and
+candidate placement is restricted to its intersection with the modelled
+catchment.
+
+Satellite color cannot prove government ownership, legal availability, soil,
+rock, crops, seasonal water, utilities, protected status, or excavation
+suitability. Therefore the UI and API never describe this polygon as verified
+government land. Cadastral and field verification are mandatory.
+
+## 8. Runoff and pond geometry
+
+Annual screening water yield is:
+
+`V = C x A x P`
+
+where `V` is cubic metres per year, `C` is a documented runoff coefficient, `A`
+is modelled catchment area in square metres, and `P` is mean annual rainfall in
+metres. The system does not infer `C` from image color. If the coefficient or its
+basis is absent, runoff and pond geometry are unavailable rather than guessed.
+
+The hosted course demo labels `C = 0.30` as a demonstration scenario so the
+complete calculation path can be shown. It is not a site-approved coefficient
+and must be replaced for real work. Peak flow is separate and remains absent
+until an approved design rainfall intensity is configured:
+
+`Q = C x i x A / 3.6`
+
+for area in square kilometres and intensity in millimetres per hour.
+
+Pond capacity uses rectangular-frustum geometry with configurable length/width
+ratio, side slope, water depth, freeboard, and capture efficiency. Capacity is
+measured to water level; excavation volume and crest dimensions include
+freeboard. The footprint is constrained by candidate area and no geometry is
+returned if even the minimum cross-section cannot fit.
+
+The module does not design an inlet, outlet, spillway, bund, liner, sediment
+forebay, ramp, fencing, slope stabilization, or construction sequence.
+
+## 9. Frontend and visualization
+
+The responsive sidebar contains a Phase 2 file uploader plus place search,
+coordinate entry, radius selection, request start/cancel controls, and reset. The
+map displays satellite imagery and relevant result layers. Contour-upload results
+show the uploaded study boundary, computed catchment, and candidate point.
+Location results can show catchment, DEM contours, surface candidate, selected
+centre, and pond candidate.
+
+Results include source panels, quality chips, warnings, terrain/hydrology
+statistics, monthly rainfall chart, land-screening ratios, runoff assumptions,
+and pond dimensions. Form labels, keyboard focus, high contrast, live regions,
+text alternatives, reduced-motion support, and responsive breakpoints improve
+accessibility.
+
+## 10. API, errors, and security
+
+FastAPI provides Swagger at `/docs`, ReDoc at `/redoc`, and OpenAPI JSON at
+`/openapi.json` when enabled. Pydantic rejects unknown fields, non-finite values,
+unsupported coordinates, invalid radius, and malformed response data. Error
+payloads use stable codes and safe messages.
+
+Per-scope rate limits protect analysis, contour upload, search, and history.
+Logs contain a sanitized request ID, method, path, status, and duration, but not
+exact submitted coordinates or secrets. API responses use `no-store` and add
+anti-sniffing, frame, referrer, and permissions headers. CORS and trusted hosts
+are explicit in deployment. The 15 MiB upload limit is enforced before parsing
+and at the Nginx boundary.
+
+Secrets remain outside version control. Production configuration rejects
+wildcard origins/hosts, placeholder geocoding contacts, insecure provider URLs,
+weak history configuration, unbased runoff values, and unconfirmed provider
+authorization.
+
+## 11. Reliability and operations
+
+External requests share a bounded HTTP connection pool and use timeouts, retries
+with capped backoff, bounded TTL caching, and source-specific validation.
+Liveness and readiness are separate. A database outage affects readiness only
+when history is enabled, and persistence failure does not erase an otherwise
+valid analysis response.
+
+The backend and Nginx containers run as non-root users with health checks and
+restart policies. Docker Compose keeps the API and PostgreSQL off public host
+ports and exposes the frontend proxy on 8080. The Render Blueprint provides a
+free FastAPI service plus a static CDN frontend with cache and security headers.
+
+## 12. Verification evidence
+
+The final local quality matrix includes:
+
+| Gate | Result |
+| --- | --- |
+| Backend Pytest suite | 56 passed |
+| Backend statement coverage | 82.08%, above 70% CI threshold |
+| Python Ruff lint | Passed |
+| Python dependency consistency | `pip check` passed |
+| Python vulnerability audit | 0 known vulnerabilities |
+| Frontend Vitest suite | 7 passed |
+| Frontend Oxlint | Passed with 0 warnings |
+| Vite production build | Passed |
+| npm high-severity audit | 0 vulnerabilities |
+| Provided KML direct analysis | Passed, converged in approximately 3 seconds |
+| Provided KML API upload | HTTP 200 with typed response |
+| OpenAPI schema route | Passed |
+| Docker backend build | Included in local/CI verification |
+| Docker frontend build | Included in local/CI verification |
+| Alembic PostgreSQL migration | Included in GitHub Actions |
+
+Backend tests cover contour/KMZ safety, parsing variants, KML route behavior,
+input limits, D8 flow, accumulation, catchment traversal, priority-flood,
+masking, runoff equations, frustum sizing, imagery validation, rainfall gaps,
+upstream failures, response quality, security defaults, rate limiting, health,
+and privacy defaults. Frontend tests cover explicit search, search validation,
+rainfall rendering, select-then-confirm analysis, and the KML upload contract.
+
+## 13. Deployment and submission
+
+The repository contains `render.yaml` for repeatable deployment in the Singapore
+region. The configured endpoints are:
+
+- Frontend: https://sneha-village-pond-planning-2026.onrender.com
+- API: https://sneha-village-pond-api-2026.onrender.com
+- API documentation: https://sneha-village-pond-api-2026.onrender.com/docs
+
+Free Render web services can sleep after inactivity, so the first API request
+may require a cold-start wait. Docker deployment and post-deploy checks are
+documented separately in `docs/DEPLOYMENT.md`.
+
+## 14. Limitations and required field work
+
+Before any excavation decision, obtain:
+
+- cadastral ownership, easements, consent, and legal land availability;
+- total-station, RTK/GNSS, or equivalent terrain and outlet survey;
+- soil, infiltration, erodibility, lining, slope stability and geotechnical data;
+- groundwater level, recharge objective and downstream-impact assessment;
+- approved runoff coefficient and intensity-duration-frequency design rainfall;
+- sediment, evaporation, seepage, routing and environmental-release allowances;
+- utilities, buildings, roads, crops, ecology, protected areas and water quality;
+- detailed civil/geotechnical design, drawings, bill of quantities and approvals.
+
+These limits are part of the result contract and user interface rather than
+being hidden only in this report.
+
+## 15. AI-tool usage and academic integrity
+
+OpenAI Codex was used as an AI-assisted development tool for requirement review,
+code review, debugging, refactoring suggestions, automated test development,
+security checks, and documentation formatting. Generated suggestions were not
+accepted as unverified output: project files were inspected, algorithms were
+checked against the assignment, tests and audits were executed, failures were
+corrected, and the supplied KML was processed end to end. The student remains
+responsible for understanding and explaining every submitted component,
+including KML parsing, interpolation, D8 hydrology, runoff equations, pond
+geometry, API contracts, deployment, and limitations.
+
+## 16. Conclusion
+
+The completed project satisfies the assignment's software deliverables with a
+generalized Phase 2 KML/KMZ catchment API, an integrated accessible frontend,
+source-aware terrain/rainfall/imagery analysis, configurable runoff and pond
+screening, API and installation documentation, deployment infrastructure, and a
+repeatable automated test matrix. The main design achievement is not only
+producing a result, but distinguishing computed screening evidence from facts
+that require cadastral, survey, environmental, and engineering authority.
+
+## References
+
+1. Open-Meteo Elevation API: https://open-meteo.com/en/docs/elevation-api
+2. Open-Meteo Historical Weather API: https://open-meteo.com/en/docs/historical-weather-api
+3. Nominatim Usage Policy: https://operations.osmfoundation.org/policies/nominatim/
+4. FastAPI documentation: https://fastapi.tiangolo.com/
+5. Leaflet documentation: https://leafletjs.com/reference.html
+6. OpenCV documentation: https://docs.opencv.org/
+7. Render Blueprint specification: https://render.com/docs/blueprint-spec

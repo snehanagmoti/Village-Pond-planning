@@ -1,89 +1,46 @@
-import React from 'react';
-
-/**
- * RainfallChart — pure SVG bar chart showing monthly rainfall distribution.
- * No external charting library required.
- */
 export default function RainfallChart({ monthly }) {
-  if (!monthly || monthly.length === 0) return null;
-
-  const maxVal = Math.max(...monthly.map(m => m.rainfall_mm), 1);
-  const barWidth = 22;
-  const gap = 4;
-  const chartHeight = 110;
-  const chartWidth = monthly.length * (barWidth + gap);
-  const labelHeight = 20;
-  const totalHeight = chartHeight + labelHeight + 24;
+  if (!monthly?.length) return null;
+  const maxValue = Math.max(...monthly.map((item) => item.rainfall_mm), 1);
+  const left = 32;
+  const barWidth = 20;
+  const gap = 5;
+  const chartHeight = 112;
+  const chartWidth = left + monthly.length * (barWidth + gap);
+  const totalHeight = chartHeight + 34;
+  const summary = monthly.map((item) => `${item.month} ${item.rainfall_mm} millimetres`).join(', ');
 
   return (
-    <div className="rainfall-chart">
-      <h3>
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-             stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>
-        </svg>
-        Monthly Rainfall
-      </h3>
+    <figure className="rainfall-chart">
+      <figcaption>Average monthly rainfall</figcaption>
       <svg
         width="100%"
         height={totalHeight}
         viewBox={`0 0 ${chartWidth} ${totalHeight}`}
-        preserveAspectRatio="xMidYMid meet"
+        role="img"
+        aria-labelledby="rainfall-title rainfall-description"
       >
-        {monthly.map((m, i) => {
-          const barHeight = (m.rainfall_mm / maxVal) * chartHeight;
-          const x = i * (barWidth + gap);
-          const y = chartHeight - barHeight;
-
+        <title id="rainfall-title">Average monthly rainfall in millimetres</title>
+        <desc id="rainfall-description">{summary}</desc>
+        <line x1={left - 4} y1="0" x2={left - 4} y2={chartHeight} className="chart-axis" />
+        <line x1={left - 4} y1={chartHeight} x2={chartWidth} y2={chartHeight} className="chart-axis" />
+        <text x={left - 7} y="9" textAnchor="end" className="chart-axis-label">{Math.round(maxValue)}</text>
+        <text x={left - 7} y={chartHeight} textAnchor="end" className="chart-axis-label">0</text>
+        {monthly.map((item, index) => {
+          const height = (item.rainfall_mm / maxValue) * chartHeight;
+          const x = left + index * (barWidth + gap);
+          const y = chartHeight - height;
           return (
-            <g key={i}>
-              {/* Bar */}
-              <rect
-                x={x}
-                y={y}
-                width={barWidth}
-                height={barHeight}
-                rx={3}
-                ry={3}
-                fill="url(#barGradient)"
-                opacity={0.9}
-              >
-                <title>{`${m.month}: ${m.rainfall_mm} mm`}</title>
+            <g key={item.month}>
+              <rect x={x} y={y} width={barWidth} height={height} rx="2" className="rainfall-bar">
+                <title>{`${item.month}: ${item.rainfall_mm} mm using ${item.valid_years} valid years`}</title>
               </rect>
-              {/* Value label (only show for bars tall enough) */}
-              {barHeight > 18 && (
-                <text
-                  x={x + barWidth / 2}
-                  y={y + 14}
-                  textAnchor="middle"
-                  fontSize="8"
-                  fill="white"
-                  fontWeight="600"
-                >
-                  {Math.round(m.rainfall_mm)}
-                </text>
-              )}
-              {/* Month label */}
-              <text
-                x={x + barWidth / 2}
-                y={chartHeight + 14}
-                textAnchor="middle"
-                fontSize="9"
-                fill="#94a3b8"
-              >
-                {m.month.substring(0, 3)}
+              <text x={x + barWidth / 2} y={chartHeight + 14} textAnchor="middle" className="chart-month">
+                {item.month.slice(0, 3)}
               </text>
             </g>
           );
         })}
-        {/* Gradient definition */}
-        <defs>
-          <linearGradient id="barGradient" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#38bdf8"/>
-            <stop offset="100%" stopColor="#0ea5e9"/>
-          </linearGradient>
-        </defs>
       </svg>
-    </div>
+    </figure>
   );
 }

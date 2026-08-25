@@ -1,233 +1,200 @@
-"""
-Terrain Analysis Service
-------------------------
-Implements real hydrological algorithms for watershed delineation and terrain analysis.
+"""Hydrologic screening algorithms with explicit quality gates."""
 
-Key Algorithms:
-    - D8 Flow Direction:   Each cell drains to the steepest downhill neighbour (8 directions)
-    - Flow Accumulation:   Counts upstream cells draining through each point (topological sort)
-    - Watershed Delineation: Traces all cells draining to a pour point (reverse BFS)
-    - Contour Extraction:  Derives contour lines from the DEM using OpenCV threshold + findContours
-    - Shoelace Formula:    Computes polygon area in square metres from lat/lng coordinates
-
-All elevation data comes from the real DEM grid fetched by the elevation service.
-"""
-
-import numpy as np
-import cv2
+import heapq
+import logging
 import math
 from collections import deque
-from typing import List, Tuple, Dict, Optional
-import logging
+from typing import Dict, List, Optional, Tuple
+
+import cv2
+import numpy as np
+
+from config import get_settings
+from services.quality import AnalysisValidationError
 
 logger = logging.getLogger(__name__)
-
-# ────────────────────────────────────────────────────────
-# D8 Flow Direction
-# ────────────────────────────────────────────────────────
-# Direction encoding:
-#   7  0  1
-#   6  X  2
-#   5  4  3
-
-DR = [-1, -1,  0,  1, 1, 1, 0, -1]  # row offsets for directions 0–7
-DC = [ 0,  1,  1,  1, 0, -1, -1, -1]  # col offsets for directions 0–7
-DIST = [1.0, math.sqrt(2), 1.0, math.sqrt(2),
-        1.0, math.sqrt(2), 1.0, math.sqrt(2)]
+settings = get_settings()
+DR = [-1, -1, 0, 1, 1, 1, 0, -1]
+DC = [0, 1, 1, 1, 0, -1, -1, -1]
+DIST = [1.0, math.sqrt(2), 1.0, math.sqrt(2), 1.0, math.sqrt(2), 1.0, math.sqrt(2)]
 
 
 def d8_flow_direction(dem: np.ndarray) -> np.ndarray:
-    """
-    Compute D8 flow direction for every interior cell.
-
-    For each cell, finds the steepest descent among 8 neighbours.
-    Edge cells are assigned direction -1 (boundary/pit).
-
-    Parameters:
-        dem: 2D elevation grid (rows × cols)
-
-    Returns:
-        2D int array of same shape.  Each cell contains 0–7 (direction index)
-        or -1 if the cell is a pit / on the boundary.
-    """
+    """Assign each interior cell to its steepest lower D8 neighbor."""
     rows, cols = dem.shape
     flow_dir = np.full((rows, cols), -1, dtype=np.int32)
-
-    for i in range(1, rows - 1):
-        for j in range(1, cols - 1):
-            max_slope = 0.0
-            best_dir = -1
-            for d in range(8):
-                ni, nj = i + DR[d], j + DC[d]
-                slope = (dem[i, j] - dem[ni, nj]) / DIST[d]
-                if slope > max_slope:
-                    max_slope = slope
-                    best_dir = d
-            flow_dir[i, j] = best_dir
-
+    for row in range(1, rows - 1):
+        for col in range(1, cols - 1):
+            best_slope = 0.0
+            best_direction = -1
+            for direction in range(8):
+                next_row = row + DR[direction]
+                next_col = col + DC[direction]
+                slope = (dem[row, col] - dem[next_row, next_col]) / DIST[direction]
+                if slope > best_slope:
+                    best_slope = slope
+                    best_direction = direction
+            flow_dir[row, col] = best_direction
     return flow_dir
 
 
-# ────────────────────────────────────────────────────────
-# Flow Accumulation (Topological Sort)
-# ────────────────────────────────────────────────────────
+def fill_depressions(dem: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Priority-flood depression filling; returns filled DEM and fill depth."""
+    if dem.ndim != 2 or min(dem.shape) < 3 or not np.isfinite(dem).all():
+        raise AnalysisValidationError("DEM must be a finite two-dimensional grid")
+    rows, cols = dem.shape
+    filled = dem.astype(np.float64).copy()
+    visited = np.zeros_like(filled, dtype=bool)
+    heap: list[tuple[float, int, int]] = []
+    for row in range(rows):
+        for col in (0, cols - 1):
+            if not visited[row, col]:
+                heapq.heappush(heap, (filled[row, col], row, col))
+                visited[row, col] = True
+    for col in range(cols):
+        for row in (0, rows - 1):
+            if not visited[row, col]:
+                heapq.heappush(heap, (filled[row, col], row, col))
+                visited[row, col] = True
+    while heap:
+        elevation, row, col = heapq.heappop(heap)
+        for direction in range(8):
+            next_row, next_col = row + DR[direction], col + DC[direction]
+            if not (0 <= next_row < rows and 0 <= next_col < cols) or visited[next_row, next_col]:
+                continue
+            visited[next_row, next_col] = True
+            if filled[next_row, next_col] < elevation:
+                filled[next_row, next_col] = elevation
+            heapq.heappush(heap, (filled[next_row, next_col], next_row, next_col))
+    return filled, filled - dem
+
+
+def resolve_flats(dem: np.ndarray) -> np.ndarray:
+    """Add a sub-millimetre gradient across equal-elevation plateaus toward outlets."""
+    rows, cols = dem.shape
+    adjusted = dem.copy()
+    visited = np.zeros((rows, cols), dtype=bool)
+    epsilon = 1e-5
+    for start_row in range(rows):
+        for start_col in range(cols):
+            if visited[start_row, start_col]:
+                continue
+            level = dem[start_row, start_col]
+            plateau = []
+            queue = deque([(start_row, start_col)])
+            visited[start_row, start_col] = True
+            outlets = []
+            while queue:
+                row, col = queue.popleft()
+                plateau.append((row, col))
+                is_boundary = row in (0, rows - 1) or col in (0, cols - 1)
+                has_lower = False
+                for direction in range(8):
+                    next_row, next_col = row + DR[direction], col + DC[direction]
+                    if not (0 <= next_row < rows and 0 <= next_col < cols):
+                        continue
+                    neighbor = dem[next_row, next_col]
+                    if neighbor < level - 1e-9:
+                        has_lower = True
+                    elif abs(neighbor - level) <= 1e-9 and not visited[next_row, next_col]:
+                        visited[next_row, next_col] = True
+                        queue.append((next_row, next_col))
+                if is_boundary or has_lower:
+                    outlets.append((row, col))
+            if len(plateau) <= 1 or not outlets:
+                continue
+            distances = {cell: 0 for cell in outlets}
+            queue = deque(outlets)
+            plateau_set = set(plateau)
+            while queue:
+                row, col = queue.popleft()
+                for direction in range(8):
+                    neighbor = (row + DR[direction], col + DC[direction])
+                    if neighbor in plateau_set and neighbor not in distances:
+                        distances[neighbor] = distances[(row, col)] + 1
+                        queue.append(neighbor)
+            for (row, col), distance in distances.items():
+                adjusted[row, col] += distance * epsilon
+    return adjusted
+
 
 def flow_accumulation(flow_dir: np.ndarray) -> np.ndarray:
-    """
-    Compute flow accumulation: each cell's value = number of upstream cells
-    that eventually drain through it (including itself).
-
-    Uses a topological sort (Kahn's algorithm) on the D8 flow graph.
-
-    Parameters:
-        flow_dir: 2D flow direction grid from d8_flow_direction()
-
-    Returns:
-        2D int array of same shape with accumulation counts.
-    """
     rows, cols = flow_dir.shape
-    acc = np.ones((rows, cols), dtype=np.int32)
-
-    # Build in-degree for each cell (how many cells flow INTO it)
+    accumulation = np.ones((rows, cols), dtype=np.int64)
     in_degree = np.zeros((rows, cols), dtype=np.int32)
-    for i in range(rows):
-        for j in range(cols):
-            d = flow_dir[i, j]
-            if d >= 0:
-                ni, nj = i + DR[d], j + DC[d]
-                if 0 <= ni < rows and 0 <= nj < cols:
-                    in_degree[ni, nj] += 1
-
-    # Seed the queue with cells that have no upstream contributors
-    queue = deque()
-    for i in range(rows):
-        for j in range(cols):
-            if in_degree[i, j] == 0:
-                queue.append((i, j))
-
-    # Process in topological order (headwaters first → outlets last)
+    for row in range(rows):
+        for col in range(cols):
+            direction = flow_dir[row, col]
+            if direction >= 0:
+                in_degree[row + DR[direction], col + DC[direction]] += 1
+    queue = deque(zip(*np.where(in_degree == 0), strict=False))
     while queue:
-        ci, cj = queue.popleft()
-        d = flow_dir[ci, cj]
-        if d >= 0:
-            ni, nj = ci + DR[d], cj + DC[d]
-            if 0 <= ni < rows and 0 <= nj < cols:
-                acc[ni, nj] += acc[ci, cj]
-                in_degree[ni, nj] -= 1
-                if in_degree[ni, nj] == 0:
-                    queue.append((ni, nj))
+        row, col = queue.popleft()
+        direction = flow_dir[row, col]
+        if direction < 0:
+            continue
+        next_row, next_col = row + DR[direction], col + DC[direction]
+        accumulation[next_row, next_col] += accumulation[row, col]
+        in_degree[next_row, next_col] -= 1
+        if in_degree[next_row, next_col] == 0:
+            queue.append((next_row, next_col))
+    return accumulation
 
-    return acc
-
-
-# ────────────────────────────────────────────────────────
-# Watershed Delineation (Reverse BFS)
-# ────────────────────────────────────────────────────────
 
 def delineate_catchment(flow_dir: np.ndarray, pour_row: int, pour_col: int) -> np.ndarray:
-    """
-    Delineate the watershed/catchment draining to a given pour point
-    by performing a reverse BFS on the D8 flow graph.
-
-    A cell (ni, nj) is upstream of (ci, cj) if (ni, nj) has flow direction
-    pointing exactly towards (ci, cj).
-
-    Parameters:
-        flow_dir:  D8 flow direction grid
-        pour_row:  Row index of the pour/outlet point
-        pour_col:  Column index of the pour/outlet point
-
-    Returns:
-        Boolean mask (True = inside catchment).
-    """
     rows, cols = flow_dir.shape
+    if not (0 <= pour_row < rows and 0 <= pour_col < cols):
+        raise AnalysisValidationError("Pour point is outside the DEM")
     mask = np.zeros((rows, cols), dtype=bool)
     mask[pour_row, pour_col] = True
-
     queue = deque([(pour_row, pour_col)])
-
     while queue:
-        ci, cj = queue.popleft()
-        # Check all 8 neighbours: does any of them flow INTO (ci, cj)?
-        for d in range(8):
-            ni, nj = ci + DR[d], cj + DC[d]
-            if 0 <= ni < rows and 0 <= nj < cols and not mask[ni, nj]:
-                # If neighbour (ni, nj) flows in the *opposite* direction of d,
-                # it drains towards (ci, cj).
-                opposite = (d + 4) % 8
-                if flow_dir[ni, nj] == opposite:
-                    mask[ni, nj] = True
-                    queue.append((ni, nj))
-
+        row, col = queue.popleft()
+        for direction in range(8):
+            upstream_row, upstream_col = row + DR[direction], col + DC[direction]
+            if not (0 <= upstream_row < rows and 0 <= upstream_col < cols):
+                continue
+            if mask[upstream_row, upstream_col]:
+                continue
+            if flow_dir[upstream_row, upstream_col] == (direction + 4) % 8:
+                mask[upstream_row, upstream_col] = True
+                queue.append((upstream_row, upstream_col))
     return mask
 
-
-# ────────────────────────────────────────────────────────
-# Find Pour Point (highest-accumulation or lowest-elevation)
-# ────────────────────────────────────────────────────────
 
 def find_pour_point(
     dem: np.ndarray,
     flow_acc: np.ndarray,
-    valid_mask: Optional[np.ndarray] = None
+    valid_mask: Optional[np.ndarray] = None,
 ) -> Tuple[int, int]:
-    """
-    Find the best pour point (outlet) for watershed delineation.
-
-    Strategy: pick the cell with the highest flow accumulation.
-    If valid_mask is provided, only consider cells within that mask.
-    If there are ties, pick the one with the lowest elevation (natural drain).
-
-    Returns:
-        (row, col) of the pour point.
-    """
-    rows, cols = dem.shape
-    
-    acc = flow_acc.copy()
-    if valid_mask is not None and np.any(valid_mask):
-        # Mask out everything outside the valid polygon
-        acc[~valid_mask] = -1
-    else:
-        # Default: consider only interior cells
-        acc[0, :] = -1
-        acc[-1, :] = -1
-        acc[:, 0] = -1
-        acc[:, -1] = -1
-        
-    best_idx = np.unravel_index(np.argmax(acc), acc.shape)
-    return best_idx[0], best_idx[1]
+    candidates = np.ones(dem.shape, dtype=bool) if valid_mask is None else valid_mask.astype(bool)
+    if not np.any(candidates):
+        raise AnalysisValidationError("No valid pour-point cells are available")
+    maximum = int(np.max(flow_acc[candidates]))
+    rows, cols = np.where(candidates & (flow_acc == maximum))
+    elevations = dem[rows, cols]
+    winner = int(np.argmin(elevations))
+    return int(rows[winner]), int(cols[winner])
 
 
-def polygon_to_mask(polygon_raw: List[Dict[str, float]], lat_array: np.ndarray, lng_array: np.ndarray) -> np.ndarray:
-    """Convert a geographic polygon to a boolean mask on the DEM grid."""
+def polygon_to_mask(
+    polygon_raw: List[Dict[str, float]],
+    lat_array: np.ndarray,
+    lng_array: np.ndarray,
+) -> np.ndarray:
     rows, cols = len(lat_array), len(lng_array)
     mask = np.zeros((rows, cols), dtype=np.uint8)
-    if not polygon_raw:
+    if len(polygon_raw) < 3:
         return mask.astype(bool)
-        
-    lat_max, lat_min = lat_array[0], lat_array[-1]
-    lng_min, lng_max = lng_array[0], lng_array[-1]
-    
-    pts = []
-    for p in polygon_raw:
-        x = (p["lng"] - lng_min) / (lng_max - lng_min) * (cols - 1)
-        # lat_array is descending
-        y = (lat_max - p["lat"]) / (lat_max - lat_min) * (rows - 1)
-        pts.append([int(round(x)), int(round(y))])
-        
-    pts = np.array([pts], dtype=np.int32)
-    cv2.fillPoly(mask, pts, 1)
-    
-    # If the polygon was very small and no pixels were filled, pick the centroid
-    if np.sum(mask) == 0:
-        cx = sum(p[0] for p in pts[0]) / len(pts[0])
-        cy = sum(p[1] for p in pts[0]) / len(pts[0])
-        r, c = int(round(cy)), int(round(cx))
-        if 0 <= r < rows and 0 <= c < cols:
-            mask[r, c] = 1
-            
+    lat_min, lat_max = float(lat_array[0]), float(lat_array[-1])
+    lng_min, lng_max = float(lng_array[0]), float(lng_array[-1])
+    points = []
+    for point in polygon_raw:
+        x = (point["lng"] - lng_min) / (lng_max - lng_min) * (cols - 1)
+        y = (point["lat"] - lat_min) / (lat_max - lat_min) * (rows - 1)
+        points.append([int(round(x)), int(round(y))])
+    cv2.fillPoly(mask, np.asarray([points], dtype=np.int32), 1)
     return mask.astype(bool)
-
 
 
 def find_lowest_point(
@@ -236,75 +203,32 @@ def find_lowest_point(
     lng_array: np.ndarray,
     mask: Optional[np.ndarray] = None,
 ) -> Tuple[float, float, float]:
-    """
-    Find the lowest elevation point, optionally constrained to a boolean mask.
-
-    Returns:
-        (lat, lng, elevation) of the lowest point.
-    """
-    if mask is not None:
-        masked_dem = np.where(mask, dem, np.inf)
-    else:
-        masked_dem = dem
-
-    min_idx = np.unravel_index(np.argmin(masked_dem), masked_dem.shape)
-    row, col = min_idx
+    valid = np.ones(dem.shape, dtype=bool) if mask is None else mask.astype(bool)
+    if not np.any(valid):
+        raise AnalysisValidationError("No valid cells are available for pond placement")
+    masked = np.where(valid, dem, np.inf)
+    row, col = np.unravel_index(np.argmin(masked), masked.shape)
     return float(lat_array[row]), float(lng_array[col]), float(dem[row, col])
 
 
-# ────────────────────────────────────────────────────────
-# Catchment Boundary → Polygon (via OpenCV)
-# ────────────────────────────────────────────────────────
-
-def extract_catchment_boundary(
-    mask: np.ndarray,
-    lat_array: np.ndarray,
-    lng_array: np.ndarray,
-) -> List[Dict[str, float]]:
-    """
-    Convert a boolean catchment mask into a lat/lng polygon
-    using OpenCV contour detection.
-
-    The mask is upscaled for smoother boundaries before contour extraction.
-
-    Returns:
-        List of {"lat": ..., "lng": ...} dicts forming the polygon.
-    """
-    rows, cols = mask.shape
-    mask_u8 = (mask.astype(np.uint8)) * 255
-
-    # Upscale for smoother polygon edges
+def extract_catchment_boundary(mask: np.ndarray, lat_array: np.ndarray, lng_array: np.ndarray) -> List[Dict[str, float]]:
+    source = mask.astype(np.uint8) * 255
     scale = 4
-    mask_up = cv2.resize(mask_u8, (cols * scale, rows * scale), interpolation=cv2.INTER_NEAREST)
-    # Apply slight blur to smooth jagged edges
-    mask_up = cv2.GaussianBlur(mask_up, (3, 3), 0)
-    _, mask_up = cv2.threshold(mask_up, 127, 255, cv2.THRESH_BINARY)
-
-    contours_cv, _ = cv2.findContours(mask_up, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours_cv:
+    upscaled = cv2.resize(source, (source.shape[1] * scale, source.shape[0] * scale), interpolation=cv2.INTER_NEAREST)
+    contours, _ = cv2.findContours(upscaled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
         return []
+    largest = max(contours, key=cv2.contourArea)
+    largest = cv2.approxPolyDP(largest, 0.005 * cv2.arcLength(largest, True), True)
+    up_rows, up_cols = upscaled.shape
+    return [
+        {
+            "lat": float(lat_array[0] + (lat_array[-1] - lat_array[0]) * point[0][1] / max(1, up_rows - 1)),
+            "lng": float(lng_array[0] + (lng_array[-1] - lng_array[0]) * point[0][0] / max(1, up_cols - 1)),
+        }
+        for point in largest
+    ]
 
-    # Pick the largest contour
-    largest = max(contours_cv, key=cv2.contourArea)
-
-    # Simplify the contour to reduce point count
-    epsilon = 0.01 * cv2.arcLength(largest, True)
-    largest = cv2.approxPolyDP(largest, epsilon, True)
-
-    up_rows, up_cols = mask_up.shape
-    polygon = []
-    for point in largest:
-        px, py = point[0]  # OpenCV: x = column, y = row
-        lat = lat_array[0] + (lat_array[-1] - lat_array[0]) * py / (up_rows - 1)
-        lng = lng_array[0] + (lng_array[-1] - lng_array[0]) * px / (up_cols - 1)
-        polygon.append({"lat": float(lat), "lng": float(lng)})
-
-    return polygon
-
-
-# ────────────────────────────────────────────────────────
-# Contour Extraction (via OpenCV thresholding)
-# ────────────────────────────────────────────────────────
 
 def extract_contours(
     dem: np.ndarray,
@@ -312,275 +236,243 @@ def extract_contours(
     lng_array: np.ndarray,
     num_levels: int = 6,
 ) -> List[Dict]:
-    """
-    Extract contour lines from the DEM at evenly-spaced elevation levels.
-
-    Process:
-    1. Upscale the DEM using bilinear interpolation for smoother lines.
-    2. For each elevation level, threshold the DEM and run cv2.findContours.
-    3. Convert pixel coords back to geographic coordinates.
-
-    Returns:
-        List of {"elevation": float, "points": [{"lat":..., "lng":...}, ...]}
-    """
-    min_elev = float(np.nanmin(dem))
-    max_elev = float(np.nanmax(dem))
-    relief = max_elev - min_elev
-
-    if relief < 1.0:
-        logger.info("Terrain is nearly flat (relief=%.1fm), skipping contours", relief)
+    minimum, maximum = float(np.min(dem)), float(np.max(dem))
+    if maximum - minimum < 1.0:
         return []
-
-    # Upscale the DEM for smoother contour lines
     rows, cols = dem.shape
-    scale = 8
-    dem_up = cv2.resize(
-        dem.astype(np.float32),
-        (cols * scale, rows * scale),
-        interpolation=cv2.INTER_LINEAR,
-    )
-    dem_up = cv2.GaussianBlur(dem_up, (5, 5), 0)
-    up_rows, up_cols = dem_up.shape
-
-    # Choose contour levels evenly spaced between min and max (exclude extremes)
-    levels = np.linspace(min_elev, max_elev, num_levels + 2)[1:-1]
-
-    contour_data = []
-    for level in levels:
-        binary = (dem_up >= level).astype(np.uint8) * 255
-        contours_cv, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-
-        for contour in contours_cv:
+    scale = max(2, min(8, int(200 / max(rows, cols))))
+    upscaled = cv2.resize(dem.astype(np.float32), (cols * scale, rows * scale), interpolation=cv2.INTER_LINEAR)
+    upscaled = cv2.GaussianBlur(upscaled, (5, 5), 0)
+    up_rows, up_cols = upscaled.shape
+    output = []
+    for level in np.linspace(minimum, maximum, num_levels + 2)[1:-1]:
+        binary = (upscaled >= level).astype(np.uint8) * 255
+        contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in contours:
             if len(contour) < 5:
                 continue
-
-            # Simplify to reduce point count
-            epsilon = 0.005 * cv2.arcLength(contour, True)
-            contour = cv2.approxPolyDP(contour, epsilon, True)
-
-            if len(contour) < 3:
+            simplified = cv2.approxPolyDP(contour, 0.004 * cv2.arcLength(contour, True), True)
+            if len(simplified) < 3:
                 continue
+            points = [
+                {
+                    "lat": float(lat_array[0] + (lat_array[-1] - lat_array[0]) * point[0][1] / max(1, up_rows - 1)),
+                    "lng": float(lng_array[0] + (lng_array[-1] - lng_array[0]) * point[0][0] / max(1, up_cols - 1)),
+                }
+                for point in simplified
+            ]
+            output.append({"elevation": round(float(level), 1), "points": points})
+    return output
 
-            points = []
-            for pt in contour:
-                px, py = pt[0]
-                lat = lat_array[0] + (lat_array[-1] - lat_array[0]) * py / (up_rows - 1)
-                lng = lng_array[0] + (lng_array[-1] - lng_array[0]) * px / (up_cols - 1)
-                points.append({"lat": float(lat), "lng": float(lng)})
-
-            contour_data.append({
-                "elevation": round(float(level), 1),
-                "points": points,
-            })
-
-    logger.info("Extracted %d contour segments across %d levels", len(contour_data), len(levels))
-    return contour_data
-
-
-# ────────────────────────────────────────────────────────
-# Polygon Area Calculation (Shoelace Formula)
-# ────────────────────────────────────────────────────────
 
 def polygon_area_sqm(coords: List[Dict[str, float]]) -> float:
-    """
-    Calculate the area of a geographic polygon in square metres.
-
-    Uses the Shoelace formula after converting lat/lng to a local
-    flat-Earth projection (accurate for small areas < 50 km).
-
-    Parameters:
-        coords: List of {"lat": ..., "lng": ...} forming a closed polygon.
-
-    Returns:
-        Area in square metres.
-    """
     if len(coords) < 3:
         return 0.0
-
-    # Compute centroid for local projection reference
-    avg_lat = sum(c["lat"] for c in coords) / len(coords)
-    avg_lng = sum(c["lng"] for c in coords) / len(coords)
-
-    m_per_deg_lat = 111_320.0
-    m_per_deg_lng = 111_320.0 * math.cos(math.radians(avg_lat))
-
-    # Project to local Cartesian metres
-    points_m = []
-    for c in coords:
-        x = (c["lng"] - avg_lng) * m_per_deg_lng
-        y = (c["lat"] - avg_lat) * m_per_deg_lat
-        points_m.append((x, y))
-
-    # Shoelace formula
-    n = len(points_m)
-    area = 0.0
-    for i in range(n):
-        j = (i + 1) % n
-        area += points_m[i][0] * points_m[j][1]
-        area -= points_m[j][0] * points_m[i][1]
-
-    return abs(area) / 2.0
+    average_lat = sum(point["lat"] for point in coords) / len(coords)
+    average_lng = sum(point["lng"] for point in coords) / len(coords)
+    meters_lng = 111_320.0 * math.cos(math.radians(average_lat))
+    projected = [
+        ((point["lng"] - average_lng) * meters_lng, (point["lat"] - average_lat) * 111_320.0)
+        for point in coords
+    ]
+    return abs(sum(
+        projected[index][0] * projected[(index + 1) % len(projected)][1]
+        - projected[(index + 1) % len(projected)][0] * projected[index][1]
+        for index in range(len(projected))
+    )) / 2.0
 
 
-# ────────────────────────────────────────────────────────
-# Runoff Estimation (Rational Method)
-# ────────────────────────────────────────────────────────
-
-def calculate_runoff(
-    catchment_area_sqm: float,
-    annual_rainfall_mm: float,
-    runoff_coefficient: float = 0.3,
-) -> float:
-    """
-    Estimate annual runoff volume using the Rational Method.
-
-    Formula:  V = C × A × P
-        V = runoff volume in m³
-        C = runoff coefficient (0–1, depends on land cover)
-        A = catchment area in m²
-        P = rainfall depth in metres
-
-    Parameters:
-        catchment_area_sqm:  Catchment area in square metres
-        annual_rainfall_mm:  Average annual rainfall in millimetres
-        runoff_coefficient:  Dimensionless (default 0.3 for mixed rural)
-
-    Returns:
-        Estimated annual runoff volume in cubic metres.
-    """
-    rainfall_m = annual_rainfall_mm / 1000.0
-    volume_m3 = runoff_coefficient * catchment_area_sqm * rainfall_m
-    return volume_m3
+def calculate_runoff(catchment_area_sqm: float, annual_rainfall_mm: float, runoff_coefficient: float = 0.3) -> float:
+    if catchment_area_sqm < 0 or annual_rainfall_mm < 0 or not 0 <= runoff_coefficient <= 1:
+        raise ValueError("Runoff inputs must be non-negative and coefficient must be between 0 and 1")
+    return runoff_coefficient * catchment_area_sqm * annual_rainfall_mm / 1000.0
 
 
-# ────────────────────────────────────────────────────────
-# Pond Dimension Recommendation
-# ────────────────────────────────────────────────────────
+def calculate_peak_discharge(catchment_area_sqm: float, rainfall_intensity_mm_h: float, runoff_coefficient: float) -> float:
+    """Rational Method peak flow Q=C×i×A/3.6 for A in km² and i in mm/h."""
+    area_km2 = catchment_area_sqm / 1_000_000.0
+    return runoff_coefficient * rainfall_intensity_mm_h * area_km2 / 3.6
+
+
+def _frustum_geometry(bottom_width: float, depth: float, ratio: float, slope: float) -> dict:
+    bottom_length = ratio * bottom_width
+    top_width = bottom_width + 2 * slope * depth
+    top_length = bottom_length + 2 * slope * depth
+    bottom_area = bottom_width * bottom_length
+    top_area = top_width * top_length
+    volume = depth / 3.0 * (bottom_area + top_area + math.sqrt(bottom_area * top_area))
+    return {
+        "volume": volume,
+        "bottom_width": bottom_width,
+        "bottom_length": bottom_length,
+        "top_width": top_width,
+        "top_length": top_length,
+        "bottom_area": bottom_area,
+        "top_area": top_area,
+    }
+
+
+def recommend_pond_geometry(volume_m3: float, available_surface_area_sqm: Optional[float] = None) -> dict:
+    if volume_m3 <= 0:
+        raise AnalysisValidationError("Positive runoff volume is required for pond sizing")
+    target_capacity = volume_m3 * settings.capture_efficiency
+    interpolation = min(1.0, max(0.0, (target_capacity - 5_000.0) / 45_000.0))
+    depth = settings.pond_min_water_depth_m + interpolation * (
+        settings.pond_max_water_depth_m - settings.pond_min_water_depth_m
+    )
+    ratio = settings.pond_length_width_ratio
+    slope = settings.pond_side_slope_h_to_v
+    excavation_depth = depth + settings.pond_freeboard_m
+    constrained = False
+
+    if available_surface_area_sqm is not None:
+        minimum_footprint_area = (2 * slope * excavation_depth) ** 2
+        if available_surface_area_sqm <= minimum_footprint_area:
+            raise AnalysisValidationError("Detected candidate land is too small for configured depth and side slopes")
+        low, high = 0.0, math.sqrt(available_surface_area_sqm / ratio)
+        for _ in range(60):
+            mid = (low + high) / 2
+            if _frustum_geometry(mid, excavation_depth, ratio, slope)["top_area"] <= available_surface_area_sqm:
+                low = mid
+            else:
+                high = mid
+        maximum_water = _frustum_geometry(low, depth, ratio, slope)
+        if maximum_water["volume"] < target_capacity:
+            target_capacity = maximum_water["volume"]
+            constrained = True
+
+    low, high = 0.0, max(10.0, math.sqrt(target_capacity / max(depth, 0.1)))
+    while _frustum_geometry(high, depth, ratio, slope)["volume"] < target_capacity:
+        high *= 2
+    for _ in range(60):
+        mid = (low + high) / 2
+        if _frustum_geometry(mid, depth, ratio, slope)["volume"] < target_capacity:
+            low = mid
+        else:
+            high = mid
+    water_geometry = _frustum_geometry(high, depth, ratio, slope)
+    excavation_geometry = _frustum_geometry(high, excavation_depth, ratio, slope)
+    if (
+        available_surface_area_sqm is not None
+        and excavation_geometry["top_area"] > available_surface_area_sqm + 0.01
+    ):
+        raise AnalysisValidationError("Computed excavation footprint exceeds detected candidate land")
+    return {
+        "water_depth_m": round(depth, 2),
+        "excavation_depth_m": round(excavation_depth, 2),
+        "freeboard_m": round(settings.pond_freeboard_m, 2),
+        "capacity_m3": round(water_geometry["volume"], 2),
+        "water_surface_area_sqm": round(water_geometry["top_area"], 2),
+        "excavation_footprint_area_sqm": round(excavation_geometry["top_area"], 2),
+        "excavation_volume_m3": round(excavation_geometry["volume"], 2),
+        "water_length_m": round(water_geometry["top_length"], 2),
+        "water_width_m": round(water_geometry["top_width"], 2),
+        "bottom_area_sqm": round(water_geometry["bottom_area"], 2),
+        "crest_length_m": round(excavation_geometry["top_length"], 2),
+        "crest_width_m": round(excavation_geometry["top_width"], 2),
+        "bottom_length_m": round(water_geometry["bottom_length"], 2),
+        "bottom_width_m": round(water_geometry["bottom_width"], 2),
+        "side_slope_h_to_v": round(slope, 2),
+        "capture_efficiency": round(settings.capture_efficiency, 3),
+        "constrained_by_available_area": constrained,
+    }
+
 
 def recommend_pond_dimensions(volume_m3: float) -> Tuple[float, float, float]:
-    """
-    Recommend pond depth, capacity, and surface area based on available runoff.
+    """Compatibility wrapper returning water depth, capacity and top area."""
+    result = recommend_pond_geometry(volume_m3)
+    return result["water_depth_m"], result["capacity_m3"], result["water_surface_area_sqm"]
 
-    Assumptions:
-        - Target capture efficiency: 80% of estimated annual runoff.
-        - Depth selection based on volume (continuous interpolation):
-            < 5,000 m³  → 2.0 m
-            5,000–50,000 → linearly interpolated between 2.0 and 4.0 m
-            > 50,000 m³  → 4.0 m
-        - Surface area = capacity / depth.
-
-    Returns:
-        (depth_m, capacity_m3, surface_area_sqm)
-    """
-    capture_efficiency = 0.80
-    capacity = volume_m3 * capture_efficiency
-
-    # Continuous depth interpolation instead of 3 discrete tiers
-    if capacity <= 5_000:
-        depth = 2.0
-    elif capacity >= 50_000:
-        depth = 4.0
-    else:
-        # Linear interpolation between 2.0m and 4.0m
-        depth = 2.0 + (capacity - 5_000) / (50_000 - 5_000) * 2.0
-
-    surface_area = capacity / depth if depth > 0 else 0.0
-
-    return round(depth, 2), round(capacity, 2), round(surface_area, 2)
-
-
-# ────────────────────────────────────────────────────────
-# Full Terrain Analysis Pipeline
-# ────────────────────────────────────────────────────────
 
 def run_terrain_analysis(
     dem: np.ndarray,
     lat_array: np.ndarray,
     lng_array: np.ndarray,
-    gov_land_polygon: Optional[List[Dict[str, float]]] = None,
+    candidate_land_polygon: Optional[List[Dict[str, float]]] = None,
+    analysis_mask: Optional[np.ndarray] = None,
 ) -> Dict:
-    """
-    Run the complete terrain analysis pipeline on a DEM grid.
+    if dem.ndim != 2 or dem.shape != (len(lat_array), len(lng_array)):
+        raise AnalysisValidationError("DEM shape must match the latitude and longitude axes")
+    if len(lat_array) < 3 or len(lng_array) < 3:
+        raise AnalysisValidationError("Terrain analysis requires at least a 3 by 3 grid")
+    valid_mask = (
+        np.ones(dem.shape, dtype=bool)
+        if analysis_mask is None
+        else np.asarray(analysis_mask, dtype=bool)
+    )
+    if valid_mask.shape != dem.shape or int(np.sum(valid_mask)) < 3:
+        raise AnalysisValidationError("Analysis mask must match the DEM and contain valid cells")
+    filled, fill_depth = fill_depressions(dem)
+    flow_surface = resolve_flats(filled)
+    flow_direction = d8_flow_direction(flow_surface)
+    if analysis_mask is not None:
+        # Cells on the supplied study boundary are possible outlets. Outside
+        # cells must never contribute to a watershed inside that boundary.
+        eroded = cv2.erode(valid_mask.astype(np.uint8), np.ones((3, 3), np.uint8))
+        study_boundary = valid_mask & ~eroded.astype(bool)
+        flow_direction[~valid_mask | study_boundary] = -1
+    accumulation = flow_accumulation(flow_direction)
 
-    Steps:
-    1. Compute D8 flow directions
-    2. Compute flow accumulation
-    3. Find pour point (highest accumulation)
-    4. Delineate catchment watershed
-    5. Extract catchment boundary polygon
-    6. Calculate catchment area (Shoelace)
-    7. Extract contour lines
-    8. Find lowest point (for pond placement)
-    9. Compute elevation statistics
-
-    Returns:
-        dict with keys: catchment_polygon, contours, catchment_area_sqm,
-                        pond_lat, pond_lng, elevation_stats
-    """
-    logger.info("Running D8 flow direction analysis...")
-    flow_dir = d8_flow_direction(dem)
-
-    logger.info("Computing flow accumulation...")
-    flow_acc = flow_accumulation(flow_dir)
-
-    logger.info("Finding pour point (constrained to available land)...")
-    valid_mask = polygon_to_mask(gov_land_polygon, lat_array, lng_array) if gov_land_polygon else None
-    pour_row, pour_col = find_pour_point(dem, flow_acc, valid_mask)
-    logger.info("Pour point at row=%d, col=%d (elev=%.1f m)", pour_row, pour_col, dem[pour_row, pour_col])
-
-    logger.info("Delineating catchment...")
-    catchment_mask = delineate_catchment(flow_dir, pour_row, pour_col)
+    outlet_mask = (flow_direction < 0) & valid_mask
+    pour_row, pour_col = find_pour_point(dem, accumulation, outlet_mask)
+    catchment_mask = delineate_catchment(flow_direction, pour_row, pour_col) & valid_mask
     catchment_cells = int(np.sum(catchment_mask))
-    logger.info("Catchment contains %d cells", catchment_cells)
+    if catchment_cells < 3:
+        raise AnalysisValidationError("Computed watershed contains fewer than three cells")
+    catchment_ratio = catchment_cells / int(np.sum(valid_mask))
+    if catchment_ratio < 0.02:
+        raise AnalysisValidationError("Computed watershed is too small for a defensible recommendation")
 
-    # If catchment is too small (< 10% of grid), use a broader approach:
-    # find the overall lowest point and expand the catchment
-    total_cells = dem.shape[0] * dem.shape[1]
-    if catchment_cells < total_cells * 0.10:
-        logger.warning("Catchment too small (%d cells), using overall lowest point", catchment_cells)
-        min_idx = np.unravel_index(np.argmin(dem), dem.shape)
-        pour_row, pour_col = int(min_idx[0]), int(min_idx[1])
-        catchment_mask = delineate_catchment(flow_dir, pour_row, pour_col)
-        catchment_cells = int(np.sum(catchment_mask))
-
-    # If still too small, expand the catchment to a reasonable area
-    if catchment_cells < total_cells * 0.05:
-        logger.warning("Still small, falling back to circular catchment")
-        rows, cols = dem.shape
-        center_r, center_c = rows // 2, cols // 2
-        Y, X = np.ogrid[:rows, :cols]
-        radius = min(rows, cols) * 0.35
-        catchment_mask = ((Y - center_r)**2 + (X - center_c)**2) <= radius**2
-
-    logger.info("Extracting catchment boundary polygon...")
+    lat_cell_m = abs(float(lat_array[1] - lat_array[0])) * 111_320.0
+    lng_cell_m = abs(float(lng_array[1] - lng_array[0])) * 111_320.0 * math.cos(math.radians(float(np.mean(lat_array))))
+    cell_area_sqm = lat_cell_m * lng_cell_m
+    catchment_area_sqm = catchment_cells * cell_area_sqm
     catchment_polygon = extract_catchment_boundary(catchment_mask, lat_array, lng_array)
+    if len(catchment_polygon) < 3:
+        raise AnalysisValidationError("Computed watershed boundary is invalid")
 
-    logger.info("Calculating catchment area (Shoelace formula)...")
-    catchment_area_sqm = polygon_area_sqm(catchment_polygon) if len(catchment_polygon) >= 3 else 0.0
+    land_mask = polygon_to_mask(candidate_land_polygon or [], lat_array, lng_array)
+    candidate_mask = catchment_mask & land_mask
+    candidate_cells = int(np.sum(candidate_mask))
+    pond_location = None
+    if candidate_cells > 0:
+        # Prefer drainage concentration, then lower elevation among ties.
+        candidate_accumulation = np.where(candidate_mask, accumulation, -1)
+        maximum = np.max(candidate_accumulation)
+        rows, cols = np.where(candidate_mask & (accumulation == maximum))
+        winner = int(np.argmin(dem[rows, cols]))
+        row, col = int(rows[winner]), int(cols[winner])
+        pond_location = {
+            "lat": float(lat_array[row]),
+            "lng": float(lng_array[col]),
+            "elevation": float(dem[row, col]),
+        }
 
-    logger.info("Extracting contour lines...")
-    contours = extract_contours(dem, lat_array, lng_array, num_levels=6)
-
-    logger.info("Finding lowest point for pond placement...")
-    pond_lat, pond_lng, pond_elev = find_lowest_point(dem, lat_array, lng_array, catchment_mask)
-
-    # Elevation statistics
-    min_elev = float(np.nanmin(dem))
-    max_elev = float(np.nanmax(dem))
-    mean_elev = float(np.nanmean(dem))
-    relief = max_elev - min_elev
+    warnings = []
+    filled_ratio = float(np.mean(fill_depth[valid_mask] > 1e-6))
+    maximum_fill = float(np.max(fill_depth[valid_mask]))
+    if filled_ratio > 0.10 or maximum_fill > 5.0:
+        warnings.append(
+            f"DEM depression filling modified {filled_ratio * 100:.1f}% of cells (maximum {maximum_fill:.1f} m); field validation is required."
+        )
+    if candidate_cells == 0:
+        warnings.append("No detected bare-surface candidate overlaps the computed watershed; no pond location was produced.")
 
     return {
         "catchment_polygon": catchment_polygon,
-        "contours": contours,
+        "contours": extract_contours(dem, lat_array, lng_array),
         "catchment_area_sqm": catchment_area_sqm,
-        "pond_lat": pond_lat,
-        "pond_lng": pond_lng,
-        "pond_elevation": pond_elev,
+        "catchment_cells": catchment_cells,
+        "catchment_ratio": catchment_ratio,
+        "candidate_area_sqm": candidate_cells * cell_area_sqm,
+        "pond_location": pond_location,
+        "warnings": warnings,
         "elevation_stats": {
-            "min_elevation": round(min_elev, 1),
-            "max_elevation": round(max_elev, 1),
-            "mean_elevation": round(mean_elev, 1),
-            "relief": round(relief, 1),
+            "min_elevation": round(float(np.min(dem)), 1),
+            "max_elevation": round(float(np.max(dem)), 1),
+            "mean_elevation": round(float(np.mean(dem)), 1),
+            "relief": round(float(np.max(dem) - np.min(dem)), 1),
+            "grid_size": int(dem.shape[0]),
+            "cell_size_m": round(math.sqrt(cell_area_sqm), 1),
         },
     }

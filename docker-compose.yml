@@ -1,0 +1,76 @@
+services:
+  database:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-village_pond}
+      POSTGRES_USER: ${DB_USER:-pond_app}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the root .env file}
+    volumes:
+      - pond_database:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [backend]
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      APP_ENV: production
+      ENABLE_API_DOCS: "false"
+      DB_HOST: database
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME:-village_pond}
+      DB_USER: ${DB_USER:-pond_app}
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the root .env file}
+      HISTORY_ENABLED: ${HISTORY_ENABLED:-false}
+      HISTORY_API_KEY: ${HISTORY_API_KEY:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+      TRUSTED_HOSTS: ${TRUSTED_HOSTS:-localhost,127.0.0.1}
+      GEOCODING_USER_AGENT: ${GEOCODING_USER_AGENT:?Set a contactable GEOCODING_USER_AGENT}
+      OPEN_METEO_USE_AUTHORIZED: ${OPEN_METEO_USE_AUTHORIZED:?Confirm Open-Meteo authorization with true}
+      OPEN_METEO_API_KEY: ${OPEN_METEO_API_KEY:-}
+      IMAGERY_USE_AUTHORIZED: ${IMAGERY_USE_AUTHORIZED:?Confirm imagery authorization with true}
+      IMAGERY_TILE_URL: ${IMAGERY_TILE_URL:-https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}}
+      APPROVED_RUNOFF_COEFFICIENT: ${APPROVED_RUNOFF_COEFFICIENT:-}
+      APPROVED_RUNOFF_COEFFICIENT_SOURCE: ${APPROVED_RUNOFF_COEFFICIENT_SOURCE:-}
+      DESIGN_RAINFALL_INTENSITY_MM_H: ${DESIGN_RAINFALL_INTENSITY_MM_H:-}
+    command: ["sh", "-c", "alembic upgrade head && exec uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=*"]
+    depends_on:
+      database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    networks: [backend]
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_IMAGERY_TILE_URL: ${IMAGERY_TILE_URL:-https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}}
+        VITE_IMAGERY_ATTRIBUTION: "${IMAGERY_ATTRIBUTION:-Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community}"
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    networks: [backend]
+
+networks:
+  backend:
+    internal: false
+
+volumes:
+  pond_database:

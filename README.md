@@ -1,141 +1,212 @@
-# AI-Based Village Pond Planning System
+# AI-based Village Pond Planning System
 
-## Overview
-A full-stack web application that assists village administrators in identifying suitable locations for pond construction to harvest rainwater. The system integrates **real geospatial analysis**, **historical rainfall data**, and **OpenCV-based satellite image segmentation** to recommend optimal pond dimensions and storage capacity.
+This repository contains the complete Phase 2 and Phase 3 software for the
+course assignment. It supports two complementary workflows:
 
-## Technology Stack
+1. Upload a KML/KMZ contour map, reconstruct a terrain surface, identify a
+   drainage candidate, delineate its catchment, and return structured JSON.
+2. Select a real location and combine elevation, rainfall, satellite imagery,
+   hydrology, runoff assumptions, and pond geometry in one screening interface.
 
-| Layer        | Technology                                              |
-|:-------------|:--------------------------------------------------------|
-| **Backend**  | Python 3.9+, FastAPI, SQLAlchemy ORM                    |
-| **Database** | PostgreSQL 15+                                          |
-| **Frontend** | React 19 (Vite), react-leaflet, Vanilla CSS             |
-| **CV/ML**    | OpenCV (HSV segmentation, morphological ops)            |
-| **APIs**     | Open-Meteo Elevation & Archive (free), Nominatim (free), Esri Imagery (free) |
+The system is intentionally a **screening prototype**, not a construction
+design, cadastral record, or approval authority. It reports unavailable data and
+quality limitations instead of inventing convincing fallback values.
 
-## Key Algorithms
+## Submission links
 
-| Algorithm | Purpose |
-|:----------|:--------|
-| **D8 Flow Direction** | Determines drainage direction for each DEM cell (8-neighbour steepest descent) |
-| **Flow Accumulation** | Topological sort to count upstream cells draining through each point |
-| **Watershed Delineation** | Reverse BFS from pour point to identify all cells in the catchment |
-| **Contour Extraction** | OpenCV threshold + findContours on upscaled DEM grid |
-| **Shoelace Formula** | Polygon area calculation in m² from lat/lng coordinates |
-| **Rational Method** | Runoff estimation: `V = C × A × P` |
-| **HSV Segmentation** | OpenCV barren-land detection from satellite imagery |
+- GitHub: <https://github.com/snehanagmoti/Village-Pond-planning>
+- Render frontend (after Blueprint deployment):
+  <https://sneha-village-pond-planning-2026.onrender.com>
+- Render API (after Blueprint deployment):
+  <https://sneha-village-pond-api-2026.onrender.com>
+- Interactive API documentation (after Blueprint deployment):
+  <https://sneha-village-pond-api-2026.onrender.com/docs>
+- Final report source: [Final_Technical_Report.md](Final_Technical_Report.md)
+- API reference: [docs/API.md](docs/API.md)
+- Deployment guide: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 
-## Installation Guide
+## Assignment requirements implemented
 
-### Prerequisites
-1. **Python 3.9+** — [python.org](https://python.org)
-2. **Node.js 18+** — [nodejs.org](https://nodejs.org)
-3. **PostgreSQL 15+** — running on port 5432
+### Phase 2: contour catchment backend
 
-### Backend Setup
+- accepts KML and KMZ as a bounded multipart upload;
+- extracts contour elevations from standard KML names, data properties, or
+  constant altitude coordinates;
+- validates XML, coordinates, archive safety, file size, contour count, point
+  count, elevation levels, and elevation range;
+- derives the study boundary from an uploaded polygon or contour hull;
+- rasterizes contour observations and performs fixed-observation harmonic
+  interpolation without sample-specific coordinates or outputs;
+- conditions the surface, resolves flats, computes D8 flow direction and flow
+  accumulation, selects a candidate point, and reverse-delineates its catchment;
+- returns a typed JSON response containing contour summary, grid quality,
+  candidate point, catchment area and boundary, provenance, and warnings;
+- exposes the canonical `POST /api/analyze-contour` route plus compatible
+  `/api/analyzeContour` and `/api/findCatchment` aliases;
+- provides a complete upload workflow in the React frontend and Swagger/ReDoc
+  documentation in the backend.
 
-```bash
+### Phase 3: complete application and demo
+
+- satellite map with click, coordinate, and explicit place-search selection;
+- radius-aware elevation grid and hydrologic screening;
+- historical ERA5-Land rainfall climatology with valid-year accounting;
+- satellite RGB/HSV surface screening labelled as a candidate only;
+- annual runoff only when an approved coefficient and source are configured;
+- peak discharge only when an approved design intensity is configured;
+- side-sloped pond geometry with water depth, freeboard, water dimensions,
+  excavation crest/bottom dimensions, capacity, excavation volume, and area;
+- visible source provenance, analysis status, warnings, cancellation, stale
+  response protection, responsive layout, and accessible status messages;
+- reproducible Docker Compose and Render Blueprint deployments;
+- automated backend, frontend, migration, dependency, and container CI gates.
+
+## Architecture
+
+```text
+React + Leaflet static frontend
+    |-- multipart KML/KMZ ----> FastAPI contour-analysis route
+    |                              |-- safe KML/KMZ parser
+    |                              |-- contour rasterization/interpolation
+    |                              `-- shared D8 hydrology
+    |
+    `-- location/radius JSON ---> FastAPI live-source analysis route
+                                   |-- Open-Meteo elevation
+                                   |-- Open-Meteo ERA5-Land rainfall
+                                   |-- configurable imagery tiles + OpenCV
+                                   `-- runoff and pond screening
+
+Optional protected history ----> PostgreSQL + Alembic
+```
+
+## Local development
+
+Prerequisites: Python 3.12 and Node.js 24. PostgreSQL 17 is needed only when
+protected history is enabled.
+
+Backend on Windows:
+
+```powershell
 cd backend
-
-# Create and activate virtual environment
 python -m venv venv
-# Windows:
-venv\Scripts\activate
-# Linux/Mac:
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure database credentials
-# Edit .env file (copy from .env.example if needed)
-cp .env.example .env
-# Update DB_PASSWORD in .env
-
-# Create the database
-python create_db.py
-
-# Start the backend server
+.\venv\Scripts\Activate.ps1
+python -m pip install --requirement requirements-dev.txt
+Copy-Item .env.example .env
 uvicorn main:app --reload
 ```
 
-### Frontend Setup
+Frontend in another terminal:
 
-```bash
+```powershell
 cd frontend
-
-# Install dependencies
-npm install
-
-# Start the development server
+npm ci
+Copy-Item .env.example .env
 npm run dev
 ```
 
-### Accessing the Application
-- **Frontend**: http://localhost:5173
-- **Backend API Docs (Swagger)**: http://localhost:8000/docs
-- **Backend API (ReDoc)**: http://localhost:8000/redoc
+Open `http://127.0.0.1:5173`. The Vite proxy sends `/api` to
+`http://127.0.0.1:8000`, whose interactive docs are at `/docs`.
 
-## API Documentation
+Test the provided contour map directly:
 
-### `POST /api/analyze`
-Perform full terrain, rainfall, and land-cover analysis.
-
-**Request Body:**
-```json
-{
-  "center": { "lat": 18.5204, "lng": 73.8567 },
-  "radius_km": 2.0
-}
+```powershell
+curl.exe -X POST `
+  -F "contour_file=@C:\Users\Sneha Nagmoti\Downloads\contours_1m.kml" `
+  http://127.0.0.1:8000/api/analyze-contour
 ```
 
-**Response:** Complete analysis including elevation stats, catchment polygon, contour lines, rainfall data (annual + monthly), land analysis (barren ratio, adjusted runoff coefficient), runoff estimation, and pond recommendation.
+## Verification
 
-### `GET /api/search-village?q=<name>`
-Geocode a village name using Nominatim. Returns up to 5 matching locations.
+```powershell
+cd backend
+ruff check .
+pytest --cov --cov-report=term-missing --cov-fail-under=70
+pip check
+pip-audit --requirement requirements.txt
 
-### `GET /api/history?limit=20`
-Retrieve past analysis records from the database.
+cd ..\frontend
+npm run lint
+npm run test
+npm run build
+npm audit --audit-level=high
 
-## Project Structure
-
-```
-village_pond_planning/
-├── backend/
-│   ├── .env                    # Database credentials (git-ignored)
-│   ├── .env.example            # Template for .env
-│   ├── requirements.txt        # Python dependencies
-│   ├── main.py                 # FastAPI application entry point
-│   ├── create_db.py            # Database creation script
-│   ├── models/
-│   │   ├── database.py         # SQLAlchemy models + connection
-│   │   └── schemas.py          # Pydantic request/response schemas
-│   ├── routers/
-│   │   └── pond_planner.py     # API endpoints
-│   └── services/
-│       ├── elevation.py        # DEM fetching (Open-Meteo API)
-│       ├── terrain.py          # D8 watershed + contour algorithms
-│       ├── cv_analyzer.py      # OpenCV satellite image analysis
-│       ├── rainfall.py         # Historical rainfall (Open-Meteo)
-│       └── geocoding.py        # Village search (Nominatim)
-├── frontend/
-│   ├── index.html
-│   ├── package.json
-│   └── src/
-│       ├── App.jsx             # Main application component
-│       ├── index.css           # Global styles
-│       ├── main.jsx            # React entry point
-│       └── components/
-│           ├── SearchBar.jsx   # Village geocoding search
-│           ├── MapLegend.jsx   # Map layer legend
-│           └── RainfallChart.jsx  # SVG monthly rainfall chart
-├── README.md                   # This file
-└── Final_Technical_Report.md   # Detailed technical report
+cd ..
+docker compose config
+docker build --tag village-pond-backend:test backend
+docker build --tag village-pond-frontend:test frontend
 ```
 
-## All APIs are Free
-This project uses **only free, no-API-key-required services**:
-- **Open-Meteo Elevation API** — SRTM-based DEM data (~90m resolution)
-- **Open-Meteo Archive API** — 11 years of daily precipitation data
-- **Nominatim (OpenStreetMap)** — Geocoding / village name search
-- **Esri World Imagery** — Satellite imagery tiles (display + CV analysis)
+GitHub Actions repeats the backend/frontend gates, runs Alembic against a real
+PostgreSQL service, audits both dependency trees, and builds both containers.
+
+## API summary
+
+- `POST /api/analyze-contour` - upload KML/KMZ and compute a contour-derived
+  catchment (`contour_file` multipart field, 15 MiB default limit).
+- `POST /api/analyze` - run location/radius screening (0.5-5 km default).
+- `GET /api/search-village?q=...` - explicitly submitted place search.
+- `GET /api/history?limit=...` - optional protected history; disabled by default.
+- `GET /health/live` and `GET /health/ready` - health endpoints.
+- `GET /docs`, `/redoc`, and `/openapi.json` - API documentation when enabled.
+
+Errors contain a stable `detail.code` and safe `detail.message`. See
+[docs/API.md](docs/API.md) for request formats, response fields, validation, and
+error behavior.
+
+## Algorithms and scientific limits
+
+The uploaded contours are observations, not a raster DEM. The service preserves
+observed contour cells, interpolates between them, masks the study area, and
+passes the resulting grid through the shared hydrology pipeline. The candidate
+is the cell with maximum contributing area inside the supported domain, with
+lower elevation used as a tie-breaker. Reverse D8 traversal determines the
+contributing cells and latitude-corrected grid spacing determines catchment area.
+
+The live workflow uses a priority-flood conditioned DEM, deterministic flat
+resolution, steepest-descent D8 routing, watershed extraction, and source-aware
+quality gates. Annual water yield is `V = C x A x P`; peak flow uses
+`Q = C x i x A / 3.6` only when the required approved values exist. Pond volume
+uses rectangular-frustum geometry with configurable side slopes and freeboard.
+
+These outputs remain sensitive to contour quality, DEM resolution, boundary
+truncation, roads and culverts, soil, infiltration, groundwater, sediment,
+seepage, evaporation, rainfall extremes, land ownership, ecology, and field
+conditions. Survey and qualified engineering verification are required.
+
+## Configuration and privacy
+
+Copy the relevant `.env.example` and review every value. Important controls:
+
+- production mode requires explicit CORS and trusted hosts, a contactable
+  geocoding user agent, HTTPS providers, and affirmative provider-terms gates;
+- precise-location history is disabled unless explicitly enabled with a strong
+  API key and database credentials;
+- runoff coefficients and design rainfall intensities remain blank until their
+  approved sources are documented;
+- upload, archive, geometry, grid, external-call, rate, and cache limits are
+  configurable;
+- secrets belong in an untracked `.env` or deployment secret manager.
+
+The public course demo uses `APP_ENV=demo`, keeps history disabled, and labels
+`C=0.30` as a course screening scenario so the complete runoff/geometry path can
+be demonstrated. That value must be replaced by an approved site-specific
+coefficient for real work. The demo does not represent an assertion of
+commercial production rights for third-party data.
+
+## Deployment
+
+`render.yaml` provisions a free FastAPI service and static React site. Follow
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) to connect the repository and verify the
+public URLs. For self-hosting, copy the root `.env.example`, replace every
+placeholder, and use `docker compose up -d` behind managed HTTPS.
+
+## Repository map
+
+- `backend/` - FastAPI service, geospatial/hydrology code, migrations, tests.
+- `frontend/` - React/Leaflet interface, tests, Nginx container.
+- `docs/API.md` - request/response and route documentation.
+- `docs/DEPLOYMENT.md` - Render and Docker deployment procedure.
+- `Final_Technical_Report.md` - final report source.
+- `output/pdf/` - rendered final report after generation.
+- `.github/workflows/ci.yml` - continuous integration quality gates.
+- `render.yaml` and `docker-compose.yml` - cloud and container infrastructure.

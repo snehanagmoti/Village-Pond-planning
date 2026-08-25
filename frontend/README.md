@@ -1,16 +1,22 @@
-# React + Vite
+# Village Pond Planning frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+This React/Vite client presents screening controls, provenance, data-quality warnings, optional results, and geospatial overlays. It requires an explicit user confirmation before analysis and never labels RGB-derived surface appearance as ownership or final suitability.
 
-Currently, two official plugins are available:
+```powershell
+npm ci
+Copy-Item .env.example .env
+npm run dev
+```
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Quality gates:
 
-## React Compiler
+```powershell
+npm run lint
+npm run test
+npm run build
+npm audit --audit-level=high
+```
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+`VITE_API_BASE_URL` defaults to `/api`. The protected history endpoint is intentionally not exposed in the public client because its administrator key must never be compiled into browser code. Imagery URL and attribution are compile-time settings; if an operator changes the imagery origin, the Nginx content-security policy must be updated as well.
 
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+See the repository-level README for deployment and scientific limitations.

@@ -1,138 +1,219 @@
-"""
-Elevation Service
------------------
-Fetches real Digital Elevation Model (DEM) data from the Open-Meteo Elevation API.
-The API provides ~90m resolution SRTM-based elevation data worldwide, for free.
+"""Validated, radius-aware elevation-grid acquisition."""
 
-Returns a 2D NumPy grid of elevations along with the latitude and longitude arrays
-that define the spatial extent of the grid.
-"""
-
-import httpx
-import numpy as np
 import asyncio
-from typing import Tuple
 import logging
+import math
+import time
+from dataclasses import dataclass
+from urllib.parse import urlparse
+
+import numpy as np
+
+from config import get_settings
+from services.cache import TTLCache
+from services.http_client import get_with_retries
+from services.quality import SourceInfo, UpstreamDataError
 
 logger = logging.getLogger(__name__)
+BATCH_SIZE = 100
+settings = get_settings()
+_cache: TTLCache["ElevationGrid"] = TTLCache(maxsize=64, ttl_seconds=settings.cache_ttl_seconds)
+_batch_start_lock = asyncio.Lock()
+_last_batch_started_at: float | None = None
 
-# Open-Meteo Elevation API — free, no API key required
-ELEVATION_API_URL = "https://api.open-meteo.com/v1/elevation"
-BATCH_SIZE = 100  # Max points per API call to stay within URL length limits
+
+@dataclass
+class ElevationGrid:
+    dem: np.ndarray
+    latitudes: np.ndarray
+    longitudes: np.ndarray
+    source: SourceInfo
+    missing_ratio: float
+    cell_size_m: float
+
+
+async def _wait_for_batch_slot() -> None:
+    """Pace point batches so the public elevation service is not burst-throttled."""
+    global _last_batch_started_at
+    interval = settings.elevation_min_interval_seconds
+    if interval <= 0:
+        return
+    async with _batch_start_lock:
+        now = time.monotonic()
+        if _last_batch_started_at is not None:
+            delay = interval - (now - _last_batch_started_at)
+            if delay > 0:
+                await asyncio.sleep(delay)
+        _last_batch_started_at = time.monotonic()
+
+
+def _native_grid_target(radius_km: float) -> int:
+    diameter_m = radius_km * 2000.0
+    target = int(math.ceil(diameter_m / 90.0)) + 1
+    if target % 2 == 0:
+        target += 1
+    return target
+
+
+def _uses_rate_limited_public_endpoint() -> bool:
+    hostname = (urlparse(settings.elevation_api_url).hostname or "").casefold()
+    return hostname == "api.open-meteo.com" and settings.open_meteo_api_key is None
+
+
+def choose_grid_size(radius_km: float) -> int:
+    """Target native spacing, with a quota-safe cap for Open-Meteo's public endpoint."""
+    max_size = settings.elevation_grid_max
+    if _uses_rate_limited_public_endpoint():
+        max_size = min(max_size, settings.elevation_public_grid_max)
+    min_size = min(settings.elevation_grid_min, max_size)
+    target = max(min_size, min(max_size, _native_grid_target(radius_km)))
+    if target % 2 == 0:
+        target = target + 1 if target < max_size else target - 1
+    return target
+
+
+async def _fetch_batch(
+    semaphore: asyncio.Semaphore,
+    latitudes: list[float],
+    longitudes: list[float],
+) -> list[float]:
+    async with semaphore:
+        await _wait_for_batch_slot()
+        response = await get_with_retries(
+            settings.elevation_api_url,
+            params={
+                "latitude": ",".join(str(value) for value in latitudes),
+                "longitude": ",".join(str(value) for value in longitudes),
+                **({"apikey": settings.open_meteo_api_key} if settings.open_meteo_api_key else {}),
+            },
+        )
+    if response.status_code != 200:
+        raise UpstreamDataError("elevation", f"Elevation source returned HTTP {response.status_code}")
+    data = response.json()
+    values = data.get("elevation")
+    if not isinstance(values, list) or len(values) != len(latitudes):
+        raise UpstreamDataError("elevation", "Elevation source returned an incomplete batch")
+    return [float(value) if value is not None else float("nan") for value in values]
 
 
 async def fetch_elevation_grid(
     center_lat: float,
     center_lng: float,
     radius_km: float = 2.0,
-    grid_size: int = 25
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Fetch a grid of elevation values centered on the given coordinates.
-
-    Uses the Open-Meteo Elevation API (SRTM-based, ~90m resolution).
-
-    Parameters:
-        center_lat: Latitude of the center point
-        center_lng: Longitude of the center point
-        radius_km:  Radius of the area to analyze (default 2km)
-        grid_size:  Number of grid points per side (default 25 → 625 total points)
-
-    Returns:
-        Tuple of:
-            - elevation_grid (np.ndarray): 2D array of shape (grid_size, grid_size) with elevation in meters
-            - lat_array (np.ndarray): 1D array of latitude values (south to north)
-            - lng_array (np.ndarray): 1D array of longitude values (west to east)
-    """
-    # Convert radius_km to degree offsets
-    # 1 degree latitude ≈ 111.32 km everywhere
-    # 1 degree longitude ≈ 111.32 km × cos(latitude)
-    lat_offset = radius_km / 111.32
-    lng_offset = radius_km / (111.32 * np.cos(np.radians(center_lat)))
-
-    lat_array = np.linspace(center_lat - lat_offset, center_lat + lat_offset, grid_size)
-    lng_array = np.linspace(center_lng - lng_offset, center_lng + lng_offset, grid_size)
-
-    # Build the flat list of all grid points (row-major order)
-    all_lats = []
-    all_lngs = []
-    for lat in lat_array:
-        for lng in lng_array:
-            all_lats.append(round(float(lat), 6))
-            all_lngs.append(round(float(lng), 6))
-
-    total_points = len(all_lats)
-    elevations = []
-
-    async with httpx.AsyncClient() as client:
-        for start in range(0, total_points, BATCH_SIZE):
-            batch_lats = all_lats[start : start + BATCH_SIZE]
-            batch_lngs = all_lngs[start : start + BATCH_SIZE]
-
-            lat_str = ",".join(str(v) for v in batch_lats)
-            lng_str = ",".join(str(v) for v in batch_lngs)
-            url = f"{ELEVATION_API_URL}?latitude={lat_str}&longitude={lng_str}"
-
-            try:
-                response = await client.get(url, timeout=30.0)
-                if response.status_code == 200:
-                    data = response.json()
-                    batch_elev = data.get("elevation", [])
-                    # Replace any None values with NaN
-                    batch_elev = [e if e is not None else float('nan') for e in batch_elev]
-                    elevations.extend(batch_elev)
-                    logger.info(
-                        "Elevation batch %d–%d fetched (%d values)",
-                        start, start + len(batch_lats), len(batch_elev),
-                    )
-                else:
-                    logger.warning("Elevation API returned %d for batch %d", response.status_code, start)
-                    elevations.extend([float('nan')] * len(batch_lats))
-            except Exception as exc:
-                logger.error("Elevation API error for batch %d: %s", start, exc)
-                elevations.extend([float('nan')] * len(batch_lats))
-
-            # Small delay between batches to be respectful to the free API
-            await asyncio.sleep(0.1)
-
-    # Reshape the flat list into a 2D grid
-    elevation_grid = np.array(elevations, dtype=np.float64).reshape(grid_size, grid_size)
-
-    # Handle NaN values by interpolating from neighbours
-    if np.any(np.isnan(elevation_grid)):
-        elevation_grid = _interpolate_nan(elevation_grid)
-
-    logger.info(
-        "Elevation grid ready: shape=%s, range=%.1f–%.1f m",
-        elevation_grid.shape,
-        float(np.nanmin(elevation_grid)),
-        float(np.nanmax(elevation_grid)),
+    grid_size: int | None = None,
+) -> ElevationGrid:
+    automatic_grid = grid_size is None
+    grid_size = grid_size or choose_grid_size(radius_km)
+    public_quota_limited = (
+        automatic_grid
+        and _uses_rate_limited_public_endpoint()
+        and grid_size < _native_grid_target(radius_km)
     )
+    if grid_size < 9 or grid_size > settings.elevation_grid_max or grid_size % 2 == 0:
+        raise ValueError("Elevation grid size must be odd and within configured bounds")
+    cache_key = (round(center_lat, 5), round(center_lng, 5), round(radius_km, 2), grid_size)
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        cached.source.message = "; ".join(
+            filter(None, [cached.source.message, "served from in-process cache"])
+        )
+        return cached
 
-    return elevation_grid, lat_array, lng_array
+    cos_lat = math.cos(math.radians(center_lat))
+    if abs(cos_lat) < 0.05:
+        raise UpstreamDataError("elevation", "Latitude is outside the supported Web Mercator range")
+    lat_offset = radius_km / 111.32
+    lng_offset = radius_km / (111.32 * cos_lat)
+    latitudes = np.linspace(center_lat - lat_offset, center_lat + lat_offset, grid_size)
+    longitudes = np.linspace(center_lng - lng_offset, center_lng + lng_offset, grid_size)
+
+    flat_lats = [round(float(lat), 6) for lat in latitudes for _ in longitudes]
+    flat_lngs = [round(float(lng), 6) for _ in latitudes for lng in longitudes]
+    semaphore = asyncio.Semaphore(settings.elevation_concurrency)
+    tasks = [
+        _fetch_batch(
+            semaphore,
+            flat_lats[start : start + BATCH_SIZE],
+            flat_lngs[start : start + BATCH_SIZE],
+        )
+        for start in range(0, len(flat_lats), BATCH_SIZE)
+    ]
+    batches = await asyncio.gather(*tasks, return_exceptions=True)
+    values: list[float] = []
+    failed_batches = 0
+    for task, start in zip(batches, range(0, len(flat_lats), BATCH_SIZE), strict=False):
+        expected = min(BATCH_SIZE, len(flat_lats) - start)
+        if isinstance(task, Exception):
+            logger.warning("elevation_batch_failed error_type=%s", type(task).__name__)
+            values.extend([float("nan")] * expected)
+            failed_batches += 1
+        else:
+            values.extend(task)
+
+    if failed_batches:
+        raise UpstreamDataError(
+            "elevation", f"{failed_batches} elevation batch request(s) failed; the DEM was not fabricated"
+        )
+
+    dem = np.asarray(values, dtype=np.float64).reshape(grid_size, grid_size)
+    dem[(dem < -500.0) | (dem > 9_000.0)] = np.nan
+    missing_ratio = float(np.isnan(dem).mean())
+    if missing_ratio >= 1.0:
+        raise UpstreamDataError("elevation", "No valid elevation values were returned")
+    if missing_ratio > 0.02:
+        raise UpstreamDataError(
+            "elevation",
+            f"Elevation coverage is insufficient ({(1 - missing_ratio) * 100:.1f}% valid)",
+        )
+    if missing_ratio > 0:
+        dem = _interpolate_nan(dem)
+
+    lat_spacing_m = abs(float(latitudes[1] - latitudes[0])) * 111_320.0
+    lng_spacing_m = (
+        abs(float(longitudes[1] - longitudes[0])) * 111_320.0 * cos_lat
+    )
+    cell_size_m = (lat_spacing_m + lng_spacing_m) / 2.0
+    status = "degraded" if missing_ratio > 0 or public_quota_limited else "reliable"
+    messages: list[str] = []
+    if missing_ratio > 0:
+        messages.append(f"Interpolated {missing_ratio * 100:.1f}% missing grid cells")
+    if public_quota_limited:
+        messages.append(
+            f"Public API quota limited the analysis grid to {grid_size}×{grid_size}; "
+            "configure a reserved or self-hosted elevation endpoint for native-resolution coverage"
+        )
+    source = SourceInfo(
+        name="Open-Meteo Elevation API / Copernicus DEM GLO-90 (2021)",
+        status=status,
+        resolution="90 m source DEM; analysis grid %.1f m" % cell_size_m,
+        coverage_ratio=round(1.0 - missing_ratio, 4),
+        message="; ".join(messages) or None,
+        license_url="https://open-meteo.com/en/docs/elevation-api",
+    )
+    result = ElevationGrid(dem, latitudes, longitudes, source, missing_ratio, cell_size_m)
+    _cache.set(cache_key, result)
+    return result
 
 
 def _interpolate_nan(grid: np.ndarray) -> np.ndarray:
-    """Fill NaN values by averaging valid neighbours (simple kernel interpolation)."""
+    """Fill a small proportion of gaps from valid local neighbors, then the valid median."""
     result = grid.copy()
-    nan_mask = np.isnan(result)
-
-    if nan_mask.all():
-        # If everything is NaN, fall back to a flat surface at 100m
-        return np.full_like(result, 100.0)
-
-    mean_val = float(np.nanmean(result))
-
-    rows, cols = result.shape
-    for i in range(rows):
-        for j in range(cols):
-            if nan_mask[i, j]:
-                neighbours = []
-                for di in [-1, 0, 1]:
-                    for dj in [-1, 0, 1]:
-                        ni, nj = i + di, j + dj
-                        if 0 <= ni < rows and 0 <= nj < cols and not nan_mask[ni, nj]:
-                            neighbours.append(result[ni, nj])
-                result[i, j] = np.mean(neighbours) if neighbours else mean_val
-
+    for _ in range(4):
+        missing = np.argwhere(np.isnan(result))
+        if len(missing) == 0:
+            break
+        changed = False
+        for row, col in missing:
+            window = result[
+                max(0, row - 1) : min(result.shape[0], row + 2),
+                max(0, col - 1) : min(result.shape[1], col + 2),
+            ]
+            valid = window[np.isfinite(window)]
+            if valid.size >= 2:
+                result[row, col] = float(np.mean(valid))
+                changed = True
+        if not changed:
+            break
+    if np.isnan(result).any():
+        result[np.isnan(result)] = float(np.nanmedian(result))
     return result

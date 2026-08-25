@@ -1,38 +1,15 @@
-import React from 'react';
-
-/**
- * MapLegend — overlay explaining the map layer colours.
- */
-export default function MapLegend() {
+export default function MapLegend({ mode = 'location' }) {
   return (
-    <div className="map-legend">
-      <h4>Map Legend</h4>
-      <div className="legend-items">
-        <div className="legend-item">
-          <span className="legend-swatch" style={{ background: '#38bdf8' }}></span>
-          <span>Catchment Area</span>
-        </div>
-        <div className="legend-item">
-          <span className="legend-swatch" style={{ background: '#fbbf24', border: '1px dashed #fbbf24' }}></span>
-          <span>Available Land (CV)</span>
-        </div>
-        <div className="legend-item">
-          <span className="legend-line" style={{ borderColor: '#a78bfa' }}></span>
-          <span>Contour Lines</span>
-        </div>
-        <div className="legend-item">
-          <svg width="14" height="14" viewBox="0 0 24 24">
-            <circle cx="12" cy="12" r="8" fill="#ef4444" stroke="#fff" strokeWidth="2"/>
-          </svg>
-          <span>Proposed Pond</span>
-        </div>
-        <div className="legend-item">
-          <svg width="14" height="14" viewBox="0 0 24 24">
-            <circle cx="12" cy="12" r="8" fill="#3b82f6" stroke="#fff" strokeWidth="2"/>
-          </svg>
-          <span>Selected Centre</span>
-        </div>
-      </div>
-    </div>
+    <aside className="map-legend" aria-label="Map legend">
+      <h2>Map legend</h2>
+      <ul>
+        <li><span className="legend-swatch catchment" aria-hidden="true" />Catchment screening boundary</li>
+        {mode === 'location'
+          ? <><li><span className="legend-swatch candidate" aria-hidden="true" />Detected bare-surface candidate</li><li><span className="legend-line" aria-hidden="true" />Elevation contours</li></>
+          : <li><span className="legend-line study-area" aria-hidden="true" />Uploaded study boundary</li>}
+        <li><span className="legend-dot pond" aria-hidden="true" />Candidate pond point</li>
+        {mode === 'location' && <li><span className="legend-dot selected" aria-hidden="true" />Selected centre</li>}
+      </ul>
+    </aside>
   );
 }

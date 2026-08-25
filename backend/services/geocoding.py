@@ -1,67 +1,79 @@
-"""
-Geocoding Service
------------------
-Provides village/place name search using the Nominatim (OpenStreetMap) API.
-Completely free, no API key required.
+"""Policy-aware explicit place search using the public Nominatim endpoint."""
 
-Nominatim Usage Policy requires:
-- A descriptive User-Agent header
-- Max 1 request per second
-"""
-
-import httpx
-from typing import List, Dict
+import asyncio
 import logging
+import time
+from typing import Dict, List
+
+from config import get_settings, valid_geocoding_user_agent
+from services.cache import TTLCache
+from services.http_client import get_with_retries
+from services.quality import UpstreamDataError
 
 logger = logging.getLogger(__name__)
-
-NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-USER_AGENT = "VillagePondPlanningSystem/1.0 (academic-project)"
+settings = get_settings()
+_cache: TTLCache[list[dict]] = TTLCache(maxsize=256, ttl_seconds=max(86400, settings.cache_ttl_seconds))
+_request_lock = asyncio.Lock()
+_last_request_at = 0.0
 
 
 async def search_village(query: str, country_code: str = "in", limit: int = 5) -> List[Dict]:
-    """
-    Search for a village or place by name using the Nominatim geocoder.
+    normalized = " ".join(query.split()).strip()
+    if len(normalized) < 2 or len(normalized) > 120:
+        return []
+    if not valid_geocoding_user_agent(settings.geocoding_user_agent):
+        raise UpstreamDataError(
+            "geocoding", "Place search is disabled until an operator contact is configured"
+        )
+    cache_key = (normalized.casefold(), country_code, min(limit, 5))
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached
 
-    Parameters:
-        query:        The search string (e.g. "Ralegan Siddhi, Maharashtra")
-        country_code: ISO 3166-1 alpha-2 code to limit results (default "in" for India)
-        limit:        Maximum number of results to return
-
-    Returns:
-        A list of dicts, each containing:
-            - display_name: Full name as returned by Nominatim
-            - lat: Latitude
-            - lng: Longitude
-    """
-    params = {
-        "q": query,
-        "format": "json",
-        "limit": limit,
-        "countrycodes": country_code,
-    }
-
-    headers = {"User-Agent": USER_AGENT}
-
-    async with httpx.AsyncClient() as client:
+    global _last_request_at
+    async with _request_lock:
+        wait_for = settings.geocoding_min_interval_seconds - (time.monotonic() - _last_request_at)
+        if wait_for > 0:
+            await asyncio.sleep(wait_for)
         try:
-            response = await client.get(
-                NOMINATIM_URL, params=params, headers=headers, timeout=10.0
+            response = await get_with_retries(
+                settings.geocoding_url,
+                params={
+                    "q": normalized,
+                    "format": "jsonv2",
+                    "limit": min(limit, 5),
+                    "countrycodes": country_code,
+                    "addressdetails": 0,
+                },
+                headers={"User-Agent": settings.geocoding_user_agent},
             )
-            if response.status_code == 200:
-                data = response.json()
-                results = []
-                for item in data:
-                    results.append({
-                        "display_name": item.get("display_name", ""),
-                        "lat": float(item.get("lat", 0)),
-                        "lng": float(item.get("lon", 0)),
-                    })
-                logger.info("Geocoding '%s' returned %d results", query, len(results))
-                return results
-            else:
-                logger.warning("Nominatim returned status %d", response.status_code)
         except Exception as exc:
-            logger.error("Geocoding error: %s", exc)
+            raise UpstreamDataError(
+                "geocoding", "The place-search provider is temporarily unavailable"
+            ) from exc
+        finally:
+            _last_request_at = time.monotonic()
 
-    return []
+    if response.status_code != 200:
+        logger.warning("geocoding_failed status=%d", response.status_code)
+        raise UpstreamDataError(
+            "geocoding", f"The place-search provider returned HTTP {response.status_code}"
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise UpstreamDataError("geocoding", "The place-search provider returned invalid JSON") from exc
+    if not isinstance(payload, list):
+        raise UpstreamDataError("geocoding", "The place-search provider returned an invalid response")
+    results = []
+    for item in payload:
+        try:
+            lat = float(item["lat"])
+            lng = float(item["lon"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        display_name = str(item.get("display_name", "")).strip()[:500]
+        if display_name and -85 <= lat <= 85 and -180 <= lng <= 180:
+            results.append({"display_name": display_name, "lat": lat, "lng": lng})
+    _cache.set(cache_key, results)
+    return results

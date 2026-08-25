@@ -1,92 +1,85 @@
-import React, { useState, useEffect, useRef } from 'react';
-import axios from 'axios';
+import { useEffect, useRef, useState } from 'react';
 
-const API_URL = "http://localhost:8000/api/search-village";
+import { api, apiErrorMessage } from '../api';
 
-/**
- * SearchBar component — geocodes village names using Nominatim via the backend.
- * Displays a dropdown of matching results for the user to select.
- */
+
 export default function SearchBar({ onSelect }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
-  const [showDropdown, setShowDropdown] = useState(false);
   const [loading, setLoading] = useState(false);
-  const debounceRef = useRef(null);
-  const containerRef = useRef(null);
+  const [message, setMessage] = useState('');
+  const abortRef = useRef(null);
 
-  // Close dropdown when clicking outside
-  useEffect(() => {
-    const handler = (e) => {
-      if (containerRef.current && !containerRef.current.contains(e.target)) {
-        setShowDropdown(false);
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
+  useEffect(() => () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
   }, []);
 
-  const handleSearch = (value) => {
-    setQuery(value);
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-
-    if (value.trim().length < 2) {
-      setResults([]);
-      setShowDropdown(false);
+  const submitSearch = async (event) => {
+    event.preventDefault();
+    const normalized = query.trim();
+    if (normalized.length < 2) {
+      setMessage('Enter at least two characters.');
       return;
     }
-
-    debounceRef.current = setTimeout(async () => {
-      setLoading(true);
-      try {
-        const resp = await axios.get(API_URL, { params: { q: value } });
-        setResults(resp.data || []);
-        setShowDropdown(true);
-      } catch (err) {
-        console.error("Search error:", err);
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setLoading(true);
+    setMessage('Searching…');
+    try {
+      const response = await api.get('/search-village', {
+        params: { q: normalized },
+        signal: controller.signal,
+      });
+      const nextResults = response.data || [];
+      setResults(nextResults);
+      setMessage(nextResults.length ? `${nextResults.length} places found.` : 'No matching places found.');
+    } catch (error) {
+      if (error?.code !== 'ERR_CANCELED') {
         setResults([]);
-      } finally {
-        setLoading(false);
+        setMessage(apiErrorMessage(error, 'Place search failed.'));
       }
-    }, 400); // 400ms debounce to respect Nominatim rate limits
+    } finally {
+      if (abortRef.current === controller) setLoading(false);
+    }
   };
 
-  const handleSelect = (result) => {
-    setQuery(result.display_name.split(',')[0]); // Show short name
-    setShowDropdown(false);
+  const chooseResult = (result) => {
+    setQuery(result.display_name.split(',')[0]);
+    setResults([]);
+    setMessage(`${result.display_name} selected.`);
     onSelect(result);
   };
 
   return (
-    <div className="search-container" ref={containerRef}>
-      <div className="search-input-wrapper">
-        <svg className="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none"
-             stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="11" cy="11" r="8"/>
-          <path d="m21 21-4.35-4.35"/>
-        </svg>
-        <input
-          id="village-search"
-          type="text"
-          placeholder="Search village or location..."
-          value={query}
-          onChange={(e) => handleSearch(e.target.value)}
-          onFocus={() => results.length > 0 && setShowDropdown(true)}
-          autoComplete="off"
-        />
-        {loading && <div className="search-spinner"></div>}
-      </div>
-
-      {showDropdown && results.length > 0 && (
-        <ul className="search-dropdown">
-          {results.map((r, idx) => (
-            <li key={idx} onClick={() => handleSelect(r)}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-                   stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
-                <circle cx="12" cy="10" r="3"/>
-              </svg>
-              <span>{r.display_name}</span>
+    <div className="search-container">
+      <form className="search-form" onSubmit={submitSearch} role="search">
+        <label htmlFor="village-search">Village or location</label>
+        <div className="search-input-row">
+          <input
+            id="village-search"
+            type="search"
+            placeholder="Example: Ralegan Siddhi"
+            value={query}
+            minLength={2}
+            maxLength={120}
+            onChange={(event) => setQuery(event.target.value)}
+            autoComplete="off"
+          />
+          <button className="compact-btn" type="submit" disabled={loading}>
+            {loading ? 'Searching' : 'Search'}
+          </button>
+        </div>
+      </form>
+      <div className="sr-status" aria-live="polite">{message}</div>
+      {results.length > 0 && (
+        <ul className="search-results" aria-label="Place search results">
+          {results.map((result) => (
+            <li key={`${result.lat}:${result.lng}:${result.display_name}`}>
+              <button type="button" onClick={() => chooseResult(result)}>
+                {result.display_name}
+              </button>
             </li>
           ))}
         </ul>

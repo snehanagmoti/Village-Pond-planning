@@ -1,185 +1,230 @@
-"""
-Computer Vision Land Analyzer
-------------------------------
-Uses OpenCV to analyze satellite imagery for barren/available land suitable
-for pond excavation.
+"""Radius-matched satellite mosaic and conservative land-cover screening."""
 
-Pipeline:
-1. Download a satellite tile from Esri World Imagery (free, same tiles used by the map)
-2. Convert to HSV colour space
-3. Threshold for barren land colours (brown, tan, grey, dry earth)
-4. Apply morphological operations to clean up noise
-5. Calculate barren land ratio → adjust the runoff coefficient
-6. Extract the largest barren region as a polygon
-
-The barren-land ratio directly influences the runoff coefficient:
-    - More barren land → higher runoff (less water absorbed by vegetation)
-    - More vegetated → lower runoff
-"""
+import asyncio
+import logging
+import math
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-import httpx
-import math
-from typing import Dict, List, Optional, Tuple
-import logging
+
+from config import get_settings
+from services.cache import TTLCache
+from services.http_client import get_with_retries
+from services.quality import SourceInfo, UpstreamDataError
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
+_cache: TTLCache["SatelliteMosaic"] = TTLCache(maxsize=32, ttl_seconds=settings.cache_ttl_seconds)
 
-# Esri World Imagery tile server — same free tiles used by the frontend map
-TILE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+
+@dataclass
+class SatelliteMosaic:
+    image: np.ndarray
+    bounds: Tuple[float, float, float, float]
+    zoom: int
+    source: SourceInfo
+
+
+@dataclass
+class LandCoverResult:
+    bare_surface_ratio: float
+    vegetation_ratio: float
+    water_ratio: float
+    low_saturation_surface_ratio: float
+    candidate_contour: Optional[np.ndarray]
+    status: str
+    message: str
 
 
 def _lat_lng_to_tile(lat: float, lng: float, zoom: int) -> Tuple[int, int]:
-    """Convert geographic coordinates to Slippy Map tile coordinates."""
-    n = 2 ** zoom
+    lat = max(-85.05112878, min(85.05112878, lat))
+    n = 2**zoom
     x = int((lng + 180.0) / 360.0 * n)
     lat_rad = math.radians(lat)
-    y = int((1.0 - math.log(math.tan(lat_rad) + 1.0 / math.cos(lat_rad)) / math.pi) / 2.0 * n)
+    y = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
+    return max(0, min(n - 1, x)), max(0, min(n - 1, y))
+
+
+def _lat_lng_to_fractional_tile(lat: float, lng: float, zoom: int) -> Tuple[float, float]:
+    lat = max(-85.05112878, min(85.05112878, lat))
+    n = 2**zoom
+    x = (lng + 180.0) / 360.0 * n
+    lat_rad = math.radians(lat)
+    y = (1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n
     return x, y
 
 
-def _tile_bounds(x: int, y: int, z: int) -> Tuple[float, float, float, float]:
-    """Get geographic bounds (lat_min, lat_max, lng_min, lng_max) of a tile."""
-    n = 2 ** z
-    lng_min = x / n * 360.0 - 180.0
-    lng_max = (x + 1) / n * 360.0 - 180.0
-    lat_max = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / n))))
-    lat_min = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * (y + 1) / n))))
-    return lat_min, lat_max, lng_min, lng_max
+def _study_bounds(lat: float, lng: float, radius_km: float) -> Tuple[float, float, float, float]:
+    lat_offset = radius_km / 111.32
+    lng_offset = radius_km / (111.32 * math.cos(math.radians(lat)))
+    bounds = (lat - lat_offset, lat + lat_offset, lng - lng_offset, lng + lng_offset)
+    if bounds[2] < -180 or bounds[3] > 180:
+        raise UpstreamDataError(
+            "satellite_imagery", "Study areas crossing the antimeridian are not supported"
+        )
+    return bounds
 
 
-async def download_satellite_tile(lat: float, lng: float, zoom: int = 14) -> Optional[np.ndarray]:
-    """
-    Download a satellite imagery tile from the Esri tile server.
-
-    Parameters:
-        lat:  Latitude of the centre point
-        lng:  Longitude of the centre point
-        zoom: Zoom level (14 gives ~10m/pixel, covering ~1.5 km per tile)
-
-    Returns:
-        BGR image as a NumPy array, or None on failure.
-    """
-    tx, ty = _lat_lng_to_tile(lat, lng, zoom)
-    url = TILE_URL.format(z=zoom, y=ty, x=tx)
-
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(url, timeout=15.0)
-            if response.status_code == 200:
-                img_bytes = np.frombuffer(response.content, np.uint8)
-                img = cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
-                if img is not None:
-                    logger.info("Satellite tile downloaded: zoom=%d, tile=(%d,%d), shape=%s", zoom, tx, ty, img.shape)
-                return img
-            else:
-                logger.warning("Tile download returned status %d", response.status_code)
-        except Exception as exc:
-            logger.error("Tile download error: %s", exc)
-
-    return None
+def _choose_zoom(radius_km: float) -> int:
+    if radius_km <= 1.5:
+        return 15
+    if radius_km <= 3.0:
+        return 14
+    return 13
 
 
-def analyze_satellite_image(img: np.ndarray) -> Dict:
-    """
-    Analyze a satellite image to detect barren/available land.
+async def _download_tile(semaphore: asyncio.Semaphore, x: int, y: int, zoom: int):
+    async with semaphore:
+        response = await get_with_retries(
+            settings.imagery_tile_url.format(z=zoom, y=y, x=x),
+            headers={"Accept": "image/*"},
+        )
+    if response.status_code != 200 or not response.content:
+        return x, y, None
+    content_type = response.headers.get("content-type", "")
+    if content_type and "image" not in content_type.lower():
+        return x, y, None
+    image = cv2.imdecode(np.frombuffer(response.content, np.uint8), cv2.IMREAD_COLOR)
+    if image is None or image.shape[0] < 128 or image.shape[1] < 128:
+        return x, y, None
+    return x, y, image
 
-    Uses HSV colour-space thresholding to identify:
-    - Brown/tan earth (typical barren land)
-    - Grey/dry soil
-    - Light rocky terrain
 
-    Returns:
-        Dict containing:
-            - barren_ratio: float (0 to 1)
-            - adjusted_runoff_coeff: float (runoff coefficient based on land cover)
-            - barren_contour: largest barren region contour (pixel coords), or None
-    """
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+async def download_satellite_mosaic(lat: float, lng: float, radius_km: float) -> SatelliteMosaic:
+    zoom = _choose_zoom(radius_km)
+    cache_key = (round(lat, 5), round(lng, 5), round(radius_km, 2), zoom)
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        cached.source.message = "; ".join(
+            filter(None, [cached.source.message, "served from in-process cache"])
+        )
+        return cached
 
-    # --- Colour ranges for barren land ---
-    # Range 1: Brown/tan (typical dry earth, ploughed fields)
-    lower_brown = np.array([8, 30, 50])
-    upper_brown = np.array([30, 255, 255])
-    mask_brown = cv2.inRange(hsv, lower_brown, upper_brown)
+    lat_min, lat_max, lng_min, lng_max = _study_bounds(lat, lng, radius_km)
+    x_min, y_max = _lat_lng_to_tile(lat_min, lng_min, zoom)
+    x_max, y_min = _lat_lng_to_tile(lat_max, lng_max, zoom)
+    if x_max < x_min:
+        x_min, x_max = x_max, x_min
+    if y_max < y_min:
+        y_min, y_max = y_max, y_min
+    tile_count = (x_max - x_min + 1) * (y_max - y_min + 1)
+    if tile_count > 64:
+        raise UpstreamDataError("satellite_imagery", f"Study area requires too many imagery tiles ({tile_count})")
 
-    # Range 2: Grey/dry soil
-    lower_grey = np.array([0, 0, 80])
-    upper_grey = np.array([180, 50, 200])
-    mask_grey = cv2.inRange(hsv, lower_grey, upper_grey)
+    semaphore = asyncio.Semaphore(6)
+    downloads = await asyncio.gather(*[
+        _download_tile(semaphore, x, y, zoom)
+        for y in range(y_min, y_max + 1)
+        for x in range(x_min, x_max + 1)
+    ])
+    tiles = {(x, y): image for x, y, image in downloads if image is not None}
+    coverage = len(tiles) / tile_count
+    if coverage < 1.0:
+        raise UpstreamDataError("satellite_imagery", f"Imagery coverage is insufficient ({coverage * 100:.1f}%)")
+    tile_height, tile_width = next(iter(tiles.values())).shape[:2]
+    if any(image.shape != (tile_height, tile_width, 3) for image in tiles.values()):
+        raise UpstreamDataError("satellite_imagery", "Imagery tiles have inconsistent dimensions")
+    mosaic = np.zeros(
+        ((y_max - y_min + 1) * tile_height, (x_max - x_min + 1) * tile_width, 3),
+        dtype=np.uint8,
+    )
+    for (x, y), image in tiles.items():
+        row = (y - y_min) * tile_height
+        col = (x - x_min) * tile_width
+        mosaic[row : row + tile_height, col : col + tile_width] = image
 
-    # Range 3: Light tan / sandy
-    lower_sand = np.array([15, 20, 120])
-    upper_sand = np.array([35, 150, 255])
-    mask_sand = cv2.inRange(hsv, lower_sand, upper_sand)
+    west_x, north_y = _lat_lng_to_fractional_tile(lat_max, lng_min, zoom)
+    east_x, south_y = _lat_lng_to_fractional_tile(lat_min, lng_max, zoom)
+    left = max(0, int(math.floor((west_x - x_min) * tile_width)))
+    right = min(mosaic.shape[1], int(math.ceil((east_x - x_min) * tile_width)))
+    top = max(0, int(math.floor((north_y - y_min) * tile_height)))
+    bottom = min(mosaic.shape[0], int(math.ceil((south_y - y_min) * tile_height)))
+    if right - left < 32 or bottom - top < 32:
+        raise UpstreamDataError("satellite_imagery", "Imagery crop is unexpectedly small")
+    mosaic = mosaic[top:bottom, left:right].copy()
+    mosaic_bounds = (lat_min, lat_max, lng_min, lng_max)
+    pixel_resolution = 156543.03392 * math.cos(math.radians(lat)) / (2**zoom)
+    source = SourceInfo(
+        name=settings.imagery_source_name,
+        status="reliable",
+        resolution=f"approximately {pixel_resolution:.1f} m/pixel at zoom {zoom}",
+        coverage_ratio=round(coverage, 4),
+        message="Square study-area crop; RGB interpretation is separately marked degraded",
+        license_url=settings.imagery_license_url,
+    )
+    result = SatelliteMosaic(mosaic, mosaic_bounds, zoom, source)
+    _cache.set(cache_key, result)
+    return result
 
-    # Combine all barren masks
-    mask = cv2.bitwise_or(mask_brown, mask_grey)
-    mask = cv2.bitwise_or(mask, mask_sand)
 
-    # Morphological operations to reduce noise and fill small holes
+def analyze_satellite_image(image: np.ndarray) -> LandCoverResult:
+    """Classify broad RGB/HSV surface groups for screening, never ownership."""
+    if image is None or image.ndim != 3 or image.shape[2] != 3:
+        raise UpstreamDataError("satellite_imagery", "Decoded imagery has an invalid shape")
+    grayscale = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    mean_brightness = float(np.mean(grayscale))
+    contrast = float(np.std(grayscale))
+    if mean_brightness < 5 or mean_brightness > 250 or contrast < 4:
+        raise UpstreamDataError("satellite_imagery", "Imagery appears blank or has insufficient contrast")
+
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    vegetation = cv2.inRange(hsv, np.array([32, 35, 25]), np.array([95, 255, 245]))
+    water_blue = cv2.inRange(hsv, np.array([90, 25, 15]), np.array([140, 255, 210]))
+    water_dark = cv2.inRange(hsv, np.array([0, 0, 0]), np.array([180, 55, 70]))
+    water = cv2.bitwise_or(water_blue, water_dark)
+
+    brown = cv2.inRange(hsv, np.array([5, 35, 45]), np.array([32, 255, 245]))
+    sand = cv2.inRange(hsv, np.array([15, 18, 110]), np.array([38, 170, 255]))
+    bare = cv2.bitwise_or(brown, sand)
+    bare = cv2.bitwise_and(bare, cv2.bitwise_not(vegetation))
+    bare = cv2.bitwise_and(bare, cv2.bitwise_not(water))
+
+    low_saturation = cv2.inRange(hsv, np.array([0, 0, 75]), np.array([180, 45, 230]))
+    low_saturation = cv2.bitwise_and(low_saturation, cv2.bitwise_not(water))
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)  # fill small gaps
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)   # remove small noise
+    bare = cv2.morphologyEx(bare, cv2.MORPH_CLOSE, kernel)
+    bare = cv2.morphologyEx(bare, cv2.MORPH_OPEN, kernel)
 
-    total_pixels = img.shape[0] * img.shape[1]
-    barren_pixels = cv2.countNonZero(mask)
-    barren_ratio = barren_pixels / float(total_pixels)
+    total = float(image.shape[0] * image.shape[1])
+    def ratio(mask: np.ndarray) -> float:
+        return cv2.countNonZero(mask) / total
 
-    # Adjust runoff coefficient based on land cover
-    # More barren → less infiltration → higher runoff
-    # Fully vegetated: C ≈ 0.15,  Fully barren: C ≈ 0.55
-    adjusted_c = 0.15 + barren_ratio * 0.40
+    bare_ratio = ratio(bare)
+    vegetation_ratio = ratio(vegetation)
+    water_ratio = ratio(water)
+    low_saturation_ratio = ratio(low_saturation)
 
-    # Find the largest barren region contour
-    contours_cv, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    largest_contour = None
-    if contours_cv:
-        largest_contour = max(contours_cv, key=cv2.contourArea)
+    contours, _ = cv2.findContours(bare, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    minimum_region_area = total * 0.0025
+    candidates = [contour for contour in contours if cv2.contourArea(contour) >= minimum_region_area]
+    largest = max(candidates, key=cv2.contourArea) if candidates else None
 
-    logger.info(
-        "Land analysis: barren_ratio=%.2f, adjusted_C=%.2f, regions=%d",
-        barren_ratio, adjusted_c, len(contours_cv),
+    return LandCoverResult(
+        bare_surface_ratio=round(bare_ratio, 4),
+        vegetation_ratio=round(vegetation_ratio, 4),
+        water_ratio=round(water_ratio, 4),
+        low_saturation_surface_ratio=round(low_saturation_ratio, 4),
+        candidate_contour=largest,
+        status="degraded",
+        message="RGB/HSV screening cannot establish ownership, soil suitability, structures, crops, or legal availability",
     )
 
-    return {
-        "barren_ratio": round(barren_ratio, 3),
-        "adjusted_runoff_coeff": round(adjusted_c, 3),
-        "barren_contour": largest_contour,
-    }
 
-
-def barren_contour_to_polygon(
+def contour_to_polygon(
     contour: np.ndarray,
-    center_lat: float,
-    center_lng: float,
-    img_shape: Tuple[int, int],
-    zoom: int = 14,
+    bounds: Tuple[float, float, float, float],
+    image_shape: Tuple[int, ...],
 ) -> List[Dict[str, float]]:
-    """
-    Convert a pixel-coordinate contour from a satellite tile to geographic coords.
-
-    Uses the tile's known geographic bounds to map pixels → lat/lng.
-
-    Returns:
-        List of {"lat": ..., "lng": ...} forming the barren-land polygon.
-    """
-    tx, ty = _lat_lng_to_tile(center_lat, center_lng, zoom)
-    lat_min, lat_max, lng_min, lng_max = _tile_bounds(tx, ty, zoom)
-
-    h, w = img_shape[:2]
-
-    # Simplify the contour
-    epsilon = 0.015 * cv2.arcLength(contour, True)
-    contour = cv2.approxPolyDP(contour, epsilon, True)
-
+    lat_min, lat_max, lng_min, lng_max = bounds
+    height, width = image_shape[:2]
+    epsilon = 0.01 * cv2.arcLength(contour, True)
+    simplified = cv2.approxPolyDP(contour, epsilon, True)
     polygon = []
-    for pt in contour:
-        px, py = pt[0]
-        # Pixel (0,0) = top-left = (lat_max, lng_min)
-        lat = lat_max - (lat_max - lat_min) * py / (h - 1)
-        lng = lng_min + (lng_max - lng_min) * px / (w - 1)
-        polygon.append({"lat": float(lat), "lng": float(lng)})
-
-    return polygon
+    for point in simplified:
+        px, py = point[0]
+        lat = lat_max - (lat_max - lat_min) * float(py) / max(1, height - 1)
+        lng = lng_min + (lng_max - lng_min) * float(px) / max(1, width - 1)
+        polygon.append({"lat": lat, "lng": lng})
+    return polygon if len(polygon) >= 3 else []

@@ -1,0 +1,84 @@
+services:
+  - type: web
+    name: sneha-village-pond-api-2026
+    runtime: python
+    plan: free
+    region: singapore
+    branch: main
+    rootDir: backend
+    buildCommand: pip install --requirement requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=*
+    healthCheckPath: /health/live
+    autoDeployTrigger: commit
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.11
+      - key: APP_ENV
+        value: demo
+      - key: APP_NAME
+        value: Village Pond Planning API
+      - key: ENABLE_API_DOCS
+        value: "true"
+      - key: CORS_ORIGINS
+        value: https://sneha-village-pond-planning-2026.onrender.com
+      - key: TRUSTED_HOSTS
+        value: sneha-village-pond-api-2026.onrender.com
+      - key: GEOCODING_USER_AGENT
+        value: VillagePondPlanning/2.1 (+https://github.com/snehanagmoti/Village-Pond-planning)
+      - key: HISTORY_ENABLED
+        value: "false"
+      - key: EXTERNAL_TIMEOUT_SECONDS
+        value: "45"
+      - key: OPEN_METEO_USE_AUTHORIZED
+        value: "false"
+      - key: IMAGERY_USE_AUTHORIZED
+        value: "false"
+      - key: APPROVED_RUNOFF_COEFFICIENT
+        value: "0.30"
+      - key: APPROVED_RUNOFF_COEFFICIENT_SOURCE
+        value: Course demo scenario C=0.30; replace with an approved site-specific value
+
+  - type: web
+    name: sneha-village-pond-planning-2026
+    runtime: static
+    plan: free
+    branch: main
+    rootDir: frontend
+    buildCommand: npm ci --ignore-scripts && npm run build
+    staticPublishPath: dist
+    autoDeployTrigger: commit
+    pullRequestPreviewsEnabled: false
+    envVars:
+      - key: NODE_VERSION
+        value: 24.14.1
+      - key: VITE_API_BASE_URL
+        value: https://sneha-village-pond-api-2026.onrender.com/api
+      - key: VITE_API_TIMEOUT_MS
+        value: "180000"
+      - key: VITE_IMAGERY_TILE_URL
+        value: https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}
+      - key: VITE_IMAGERY_ATTRIBUTION
+        value: "Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /index.html
+        name: Cache-Control
+        value: no-cache, no-store, must-revalidate
+      - path: /assets/*
+        name: Cache-Control
+        value: public, max-age=31536000, immutable
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+      - path: /*
+        name: Permissions-Policy
+        value: camera=(), microphone=(), geolocation=()

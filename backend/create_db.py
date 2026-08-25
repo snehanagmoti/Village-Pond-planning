@@ -1,48 +1,38 @@
-"""
-Database Creation Script
--------------------------
-Creates the 'village_pond' PostgreSQL database if it doesn't already exist.
-Reads credentials from .env to avoid hardcoding passwords.
-"""
+"""Create the configured PostgreSQL database; schema changes belong to Alembic."""
 
 import os
+import sys
+
 import psycopg2
-from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from dotenv import load_dotenv
+from psycopg2 import sql
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
-load_dotenv()
 
-DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "postgres")
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = os.getenv("DB_PORT", "5432")
-DB_NAME = os.getenv("DB_NAME", "village_pond")
+def main() -> int:
+    load_dotenv()
+    database_name = os.getenv("DB_NAME", "village_pond")
+    try:
+        with psycopg2.connect(
+            dbname="postgres",
+            user=os.getenv("DB_USER", "postgres"),
+            password=os.getenv("DB_PASSWORD", "postgres"),
+            host=os.getenv("DB_HOST", "localhost"),
+            port=os.getenv("DB_PORT", "5432"),
+        ) as connection:
+            connection.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1 FROM pg_catalog.pg_database WHERE datname = %s", (database_name,))
+                if cursor.fetchone() is None:
+                    cursor.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database_name)))
+                    print(f"Database '{database_name}' created. Run: alembic upgrade head")
+                else:
+                    print(f"Database '{database_name}' already exists. Run: alembic upgrade head")
+        return 0
+    except Exception as exc:
+        print(f"Database creation failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
 
-try:
-    # Connect to the default postgres database to create a new one
-    conn = psycopg2.connect(
-        dbname="postgres",
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT,
-    )
-    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-    cursor = conn.cursor()
 
-    # Check if database exists
-    cursor.execute(
-        "SELECT 1 FROM pg_catalog.pg_database WHERE datname = %s", (DB_NAME,)
-    )
-    exists = cursor.fetchone()
-
-    if not exists:
-        cursor.execute(f'CREATE DATABASE "{DB_NAME}"')
-        print(f"Database '{DB_NAME}' created successfully!")
-    else:
-        print(f"Database '{DB_NAME}' already exists.")
-
-    cursor.close()
-    conn.close()
-except Exception as e:
-    print(f"FAILED: {e}")
+if __name__ == "__main__":
+    raise SystemExit(main())

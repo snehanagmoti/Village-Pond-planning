@@ -7,13 +7,17 @@ catchment delineation, runoff, and pond sizing.
 
 import numpy as np
 import pytest
+
 from services.terrain import (
-    d8_flow_direction,
-    flow_accumulation,
-    delineate_catchment,
     calculate_runoff,
-    recommend_pond_dimensions,
+    d8_flow_direction,
+    delineate_catchment,
+    fill_depressions,
+    flow_accumulation,
     polygon_area_sqm,
+    recommend_pond_dimensions,
+    recommend_pond_geometry,
+    run_terrain_analysis,
 )
 
 
@@ -87,7 +91,7 @@ class TestCatchmentDelineation:
         """A pit with no upstream cells has a 1-cell catchment."""
         flow_dir = np.full((3, 3), -1, dtype=np.int32)
         mask = delineate_catchment(flow_dir, 1, 1)
-        assert mask[1, 1] == True
+        assert mask[1, 1]
         assert np.sum(mask) == 1
 
     def test_linear_flow(self):
@@ -98,9 +102,9 @@ class TestCatchmentDelineation:
         flow_dir[1, 2] = 4  # flows south
         flow_dir[2, 2] = 4  # flows south
         mask = delineate_catchment(flow_dir, 3, 2)
-        assert mask[3, 2] == True  # pour point
-        assert mask[2, 2] == True  # upstream
-        assert mask[1, 2] == True  # upstream of upstream
+        assert mask[3, 2]  # pour point
+        assert mask[2, 2]  # upstream
+        assert mask[1, 2]  # upstream of upstream
 
 
 class TestRunoffCalculation:
@@ -126,18 +130,18 @@ class TestPondDimensions:
     """Test pond dimension recommendation."""
 
     def test_small_volume(self):
-        """Small volumes (< 5000 m³ capacity) → 2.0m depth."""
+        """Small volumes preserve the configured capture target."""
         depth, capacity, area = recommend_pond_dimensions(5000)
         assert capacity == pytest.approx(4000.0)  # 80% capture
         assert depth == 2.0
-        assert area == pytest.approx(2000.0)
+        assert area > capacity / depth  # side slopes make top area larger than average area
 
     def test_large_volume(self):
         """Large volumes (> 62500 m³) → 4.0m depth."""
         depth, capacity, area = recommend_pond_dimensions(100000)
         assert capacity == pytest.approx(80000.0)
         assert depth == 4.0
-        assert area == pytest.approx(20000.0)
+        assert area > capacity / depth
 
     def test_mid_volume_interpolated(self):
         """Mid-range volumes should have interpolated depth between 2 and 4."""
@@ -145,11 +149,20 @@ class TestPondDimensions:
         assert 2.0 < depth < 4.0
         assert capacity == pytest.approx(24000.0)
 
-    def test_surface_area_is_capacity_over_depth(self):
-        """Surface area should always equal capacity / depth."""
+    def test_trapezoidal_geometry_is_internally_consistent(self):
+        """Frustum dimensions should be positive and top dimensions larger."""
         for vol in [1000, 10000, 50000, 100000]:
-            depth, capacity, area = recommend_pond_dimensions(vol)
-            assert area == pytest.approx(capacity / depth, rel=0.01)
+            geometry = recommend_pond_geometry(vol)
+            assert geometry["capacity_m3"] == pytest.approx(vol * 0.8, rel=0.001)
+            assert geometry["water_surface_area_sqm"] > geometry["bottom_area_sqm"]
+            assert geometry["crest_width_m"] > geometry["water_width_m"]
+            assert geometry["excavation_depth_m"] > geometry["water_depth_m"]
+            assert geometry["excavation_volume_m3"] > geometry["capacity_m3"]
+
+    def test_available_area_constrains_capacity(self):
+        geometry = recommend_pond_geometry(100000, available_surface_area_sqm=5000)
+        assert geometry["excavation_footprint_area_sqm"] <= 5000.01
+        assert geometry["constrained_by_available_area"] is True
 
 
 class TestPolygonArea:
@@ -176,3 +189,27 @@ class TestPolygonArea:
     def test_empty_polygon(self):
         """An empty polygon should return 0."""
         assert polygon_area_sqm([]) == 0.0
+
+
+class TestProductionHydrology:
+    def test_priority_flood_fills_interior_depression(self):
+        dem = np.array([
+            [10, 10, 10, 10, 10],
+            [10, 8, 8, 8, 10],
+            [10, 8, 1, 8, 10],
+            [10, 8, 8, 8, 10],
+            [5, 10, 10, 10, 10],
+        ], dtype=float)
+        filled, depth = fill_depressions(dem)
+        assert filled[2, 2] >= 8
+        assert depth[2, 2] >= 7
+
+    def test_pipeline_never_invents_candidate_land(self):
+        dem = np.tile(np.arange(9, 0, -1, dtype=float)[:, None], (1, 9))
+        latitudes = np.linspace(18.0, 18.01, 9)
+        longitudes = np.linspace(73.0, 73.01, 9)
+        result = run_terrain_analysis(dem, latitudes, longitudes, [])
+        assert result["catchment_area_sqm"] > 0
+        assert result["candidate_area_sqm"] == 0
+        assert result["pond_location"] is None
+        assert any("No detected bare-surface" in warning for warning in result["warnings"])
