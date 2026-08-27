@@ -134,6 +134,12 @@ channels, decoded range, and coverage are validated; fallback results are
 labelled degraded with their own source URL and are never presented as survey
 data.
 
+Historical rainfall first uses the configured Open-Meteo archive model. When
+that provider is unavailable or quota-limited, a bounded NASA POWER fallback
+requests daily `PRECTOTCORR` values for the same configured years. The service
+still requires complete calendar years, rejects missing/sentinel values, caps
+response size, and labels the coarser MERRA-2 grid result degraded.
+
 ## Place search
 
 ### `GET /api/search-village?q=<query>`

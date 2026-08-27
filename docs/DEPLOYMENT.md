@@ -37,6 +37,10 @@ outages. Keep the HTTPS template, zoom, tile-count limit, and byte limit explici
 in production. Fallback results are source-labelled and degraded; they do not
 replace a field survey.
 
+NASA POWER daily precipitation is enabled as a bounded rainfall fallback for
+Open-Meteo archive quota failures. Its MERRA-2 grid is coarser and therefore
+reported as degraded even when all configured calendar years are complete.
+
 Render free web services may sleep after inactivity. Allow time for the first
 API request to wake the backend before judging the endpoint.
 

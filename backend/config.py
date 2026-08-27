@@ -97,6 +97,14 @@ class Settings:
         self.rainfall_api_url = os.getenv(
             "RAINFALL_API_URL", "https://archive-api.open-meteo.com/v1/archive"
         ).strip()
+        self.rainfall_fallback_enabled = _bool("RAINFALL_FALLBACK_ENABLED", True)
+        self.rainfall_fallback_url = os.getenv(
+            "RAINFALL_FALLBACK_URL",
+            "https://power.larc.nasa.gov/api/temporal/daily/point",
+        ).strip()
+        self.rainfall_max_response_bytes = _int(
+            "RAINFALL_MAX_RESPONSE_BYTES", 5 * 1024 * 1024, 1024
+        )
         self.open_meteo_api_key = os.getenv("OPEN_METEO_API_KEY", "").strip() or None
         self.open_meteo_use_authorized = _bool("OPEN_METEO_USE_AUTHORIZED", False)
 
@@ -261,6 +269,10 @@ class Settings:
                     errors.append("ELEVATION_TILE_URL must contain {z}, {x}, and {y}")
             if not self.rainfall_api_url.startswith("https://"):
                 errors.append("RAINFALL_API_URL must use HTTPS in production")
+            if self.rainfall_fallback_enabled and not self.rainfall_fallback_url.startswith(
+                "https://"
+            ):
+                errors.append("RAINFALL_FALLBACK_URL must use HTTPS in production")
             if self.history_enabled and not self.database_credentials_configured:
                 errors.append(
                     "Non-default database credentials are required when production history is enabled"

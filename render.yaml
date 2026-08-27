@@ -37,6 +37,10 @@ services:
         value: https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png
       - key: ELEVATION_TILE_ZOOM
         value: "12"
+      - key: RAINFALL_FALLBACK_ENABLED
+        value: "true"
+      - key: RAINFALL_FALLBACK_URL
+        value: https://power.larc.nasa.gov/api/temporal/daily/point
       - key: IMAGERY_USE_AUTHORIZED
         value: "false"
       - key: APPROVED_RUNOFF_COEFFICIENT

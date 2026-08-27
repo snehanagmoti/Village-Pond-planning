@@ -53,6 +53,8 @@ quality limitations instead of inventing convincing fallback values.
 - bounded, validated Terrarium terrain-tile fallback when the primary elevation
   provider rejects the deployment host;
 - historical ERA5-Land rainfall climatology with valid-year accounting;
+- NASA POWER daily precipitation fallback with the same complete-year checks
+  when the primary archive quota is unavailable;
 - satellite RGB/HSV surface screening labelled as a candidate only;
 - annual runoff only when an approved coefficient and source are configured;
 - peak discharge only when an approved design intensity is configured;
@@ -74,7 +76,7 @@ React + Leaflet static frontend
     |
     `-- location/radius JSON ---> FastAPI live-source analysis route
                                    |-- Open-Meteo elevation + bounded tile fallback
-                                   |-- Open-Meteo ERA5-Land rainfall
+                                   |-- Open-Meteo rainfall + NASA POWER fallback
                                    |-- configurable imagery tiles + OpenCV
                                    `-- runoff and pond screening
 
