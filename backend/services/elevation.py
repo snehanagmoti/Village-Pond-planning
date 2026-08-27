@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+import cv2
 import numpy as np
 
 from config import get_settings
@@ -16,6 +17,7 @@ from services.quality import SourceInfo, UpstreamDataError
 
 logger = logging.getLogger(__name__)
 BATCH_SIZE = 100
+TILE_SIZE = 256
 settings = get_settings()
 _cache: TTLCache["ElevationGrid"] = TTLCache(maxsize=64, ttl_seconds=settings.cache_ttl_seconds)
 _batch_start_lock = asyncio.Lock()
@@ -96,6 +98,138 @@ async def _fetch_batch(
     return [float(value) if value is not None else float("nan") for value in values]
 
 
+def _slippy_pixel(latitude: float, longitude: float, zoom: int) -> tuple[int, int, int, int]:
+    """Map WGS84 coordinates to a 256-pixel Web Mercator tile and pixel."""
+    latitude = max(-85.05112878, min(85.05112878, latitude))
+    world_pixels = TILE_SIZE * (1 << zoom)
+    global_x = ((longitude + 180.0) / 360.0) * world_pixels
+    latitude_rad = math.radians(latitude)
+    global_y = (
+        1.0
+        - math.asinh(math.tan(latitude_rad)) / math.pi
+    ) / 2.0 * world_pixels
+    maximum = math.nextafter(float(world_pixels), 0.0)
+    global_x = max(0.0, min(maximum, global_x))
+    global_y = max(0.0, min(maximum, global_y))
+    tile_x = int(global_x // TILE_SIZE)
+    tile_y = int(global_y // TILE_SIZE)
+    pixel_x = min(TILE_SIZE - 1, int(global_x - tile_x * TILE_SIZE))
+    pixel_y = min(TILE_SIZE - 1, int(global_y - tile_y * TILE_SIZE))
+    return tile_x, tile_y, pixel_x, pixel_y
+
+
+async def _fetch_terrarium_tile(zoom: int, tile_x: int, tile_y: int) -> np.ndarray:
+    try:
+        url = settings.elevation_tile_url.format(z=zoom, x=tile_x, y=tile_y)
+    except (KeyError, ValueError) as exc:
+        raise UpstreamDataError("elevation", "Terrain tile URL template is invalid") from exc
+    response = await get_with_retries(url, headers={"Accept": "image/png"})
+    if response.status_code != 200:
+        raise UpstreamDataError(
+            "elevation", f"Terrain tile source returned HTTP {response.status_code}"
+        )
+    content_type = response.headers.get("content-type", "").split(";", 1)[0].casefold()
+    if content_type and content_type != "image/png":
+        raise UpstreamDataError("elevation", "Terrain tile source returned a non-PNG response")
+    content = response.content
+    if not content or len(content) > settings.elevation_tile_max_bytes:
+        raise UpstreamDataError("elevation", "Terrain tile response size is invalid")
+    image = cv2.imdecode(np.frombuffer(content, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    if image is None or image.shape[:2] != (TILE_SIZE, TILE_SIZE) or image.ndim != 3:
+        raise UpstreamDataError("elevation", "Terrain tile PNG dimensions are invalid")
+    if image.shape[2] not in (3, 4):
+        raise UpstreamDataError("elevation", "Terrain tile PNG channels are invalid")
+    red = image[:, :, 2].astype(np.float64)
+    green = image[:, :, 1].astype(np.float64)
+    blue = image[:, :, 0].astype(np.float64)
+    return red * 256.0 + green + blue / 256.0 - 32768.0
+
+
+async def _fetch_terrarium_grid(
+    latitudes: np.ndarray,
+    longitudes: np.ndarray,
+    primary_failure: str,
+) -> ElevationGrid:
+    """Load a bounded DEM fallback from public Terrarium-encoded terrain tiles."""
+    zoom = settings.elevation_tile_zoom
+    samples: list[tuple[int, int, int, int]] = []
+    required_tiles: set[tuple[int, int]] = set()
+    for latitude in latitudes:
+        for longitude in longitudes:
+            tile_x, tile_y, pixel_x, pixel_y = _slippy_pixel(
+                float(latitude), float(longitude), zoom
+            )
+            required_tiles.add((tile_x, tile_y))
+            samples.append((tile_x, tile_y, pixel_x, pixel_y))
+    if len(required_tiles) > settings.elevation_tile_max_count:
+        raise UpstreamDataError(
+            "elevation",
+            f"Terrain fallback requires {len(required_tiles)} tiles, above the configured limit",
+        )
+
+    tile_keys = sorted(required_tiles)
+    tile_results = await asyncio.gather(
+        *(_fetch_terrarium_tile(zoom, tile_x, tile_y) for tile_x, tile_y in tile_keys),
+        return_exceptions=True,
+    )
+    if any(isinstance(result, Exception) for result in tile_results):
+        raise UpstreamDataError(
+            "elevation", "One or more required terrain fallback tiles were unavailable"
+        )
+    tiles = dict(zip(tile_keys, tile_results, strict=True))
+    values = [
+        float(tiles[(tile_x, tile_y)][pixel_y, pixel_x])
+        for tile_x, tile_y, pixel_x, pixel_y in samples
+    ]
+    dem = np.asarray(values, dtype=np.float64).reshape(len(latitudes), len(longitudes))
+    dem[(dem < -500.0) | (dem > 9_000.0)] = np.nan
+    missing_ratio = float(np.isnan(dem).mean())
+    if missing_ratio > 0.02:
+        raise UpstreamDataError(
+            "elevation",
+            f"Terrain fallback coverage is insufficient ({(1 - missing_ratio) * 100:.1f}% valid)",
+        )
+    if missing_ratio > 0:
+        dem = _interpolate_nan(dem)
+
+    cos_lat = math.cos(math.radians(float(np.mean(latitudes))))
+    lat_spacing_m = abs(float(latitudes[1] - latitudes[0])) * 111_320.0
+    lng_spacing_m = abs(float(longitudes[1] - longitudes[0])) * 111_320.0 * cos_lat
+    cell_size_m = (lat_spacing_m + lng_spacing_m) / 2.0
+    tile_resolution_m = 156_543.03392 * cos_lat / (1 << zoom)
+    source = SourceInfo(
+        name="AWS Open Data Terrain Tiles / Tilezen Terrarium",
+        status="degraded",
+        resolution=(
+            f"approximately {tile_resolution_m:.1f} m terrain pixels at zoom {zoom}; "
+            f"analysis grid {cell_size_m:.1f} m"
+        ),
+        coverage_ratio=round(1.0 - missing_ratio, 4),
+        message=(
+            f"{primary_failure}; used the bounded Terrain Tiles fallback. "
+            "The source mosaic varies by location and is not a field survey"
+        ),
+        license_url="https://registry.opendata.aws/terrain-tiles/",
+    )
+    return ElevationGrid(dem, latitudes, longitudes, source, missing_ratio, cell_size_m)
+
+
+async def _fallback_or_raise(
+    reason: str,
+    latitudes: np.ndarray,
+    longitudes: np.ndarray,
+) -> ElevationGrid:
+    if not settings.elevation_fallback_enabled:
+        raise UpstreamDataError("elevation", reason)
+    try:
+        return await _fetch_terrarium_grid(latitudes, longitudes, reason)
+    except UpstreamDataError as exc:
+        logger.warning("elevation_fallback_failed error_type=%s", type(exc).__name__)
+        raise UpstreamDataError(
+            "elevation", f"{reason}; terrain fallback was also unavailable"
+        ) from exc
+
+
 async def fetch_elevation_grid(
     center_lat: float,
     center_lng: float,
@@ -151,20 +285,31 @@ async def fetch_elevation_grid(
             values.extend(task)
 
     if failed_batches:
-        raise UpstreamDataError(
-            "elevation", f"{failed_batches} elevation batch request(s) failed; the DEM was not fabricated"
+        result = await _fallback_or_raise(
+            f"{failed_batches} primary elevation batch request(s) failed",
+            latitudes,
+            longitudes,
         )
+        _cache.set(cache_key, result)
+        return result
 
     dem = np.asarray(values, dtype=np.float64).reshape(grid_size, grid_size)
     dem[(dem < -500.0) | (dem > 9_000.0)] = np.nan
     missing_ratio = float(np.isnan(dem).mean())
     if missing_ratio >= 1.0:
-        raise UpstreamDataError("elevation", "No valid elevation values were returned")
-    if missing_ratio > 0.02:
-        raise UpstreamDataError(
-            "elevation",
-            f"Elevation coverage is insufficient ({(1 - missing_ratio) * 100:.1f}% valid)",
+        result = await _fallback_or_raise(
+            "No valid primary elevation values were returned", latitudes, longitudes
         )
+        _cache.set(cache_key, result)
+        return result
+    if missing_ratio > 0.02:
+        result = await _fallback_or_raise(
+            f"Primary elevation coverage is insufficient ({(1 - missing_ratio) * 100:.1f}% valid)",
+            latitudes,
+            longitudes,
+        )
+        _cache.set(cache_key, result)
+        return result
     if missing_ratio > 0:
         dem = _interpolate_nan(dem)
 

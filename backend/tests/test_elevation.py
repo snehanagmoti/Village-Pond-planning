@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 import pytest
 
@@ -6,13 +7,28 @@ from services.quality import UpstreamDataError
 
 
 class FakeResponse:
-    status_code = 200
-
-    def __init__(self, values):
+    def __init__(self, values=None, status_code=200, content=b"", headers=None):
         self.values = values
+        self.status_code = status_code
+        self.content = content
+        self.headers = headers or {}
 
     def json(self):
         return {"elevation": self.values}
+
+
+def terrarium_png(elevation_m: float) -> bytes:
+    encoded = elevation_m + 32768.0
+    red = int(encoded // 256)
+    green = int(encoded % 256)
+    blue = int((encoded - int(encoded)) * 256)
+    image = np.zeros((256, 256, 3), dtype=np.uint8)
+    image[:, :, 0] = blue
+    image[:, :, 1] = green
+    image[:, :, 2] = red
+    ok, payload = cv2.imencode(".png", image)
+    assert ok
+    return payload.tobytes()
 
 
 @pytest.mark.anyio
@@ -23,8 +39,9 @@ async def test_elevation_rejects_empty_source(monkeypatch):
         return FakeResponse([None] * count)
 
     monkeypatch.setattr(elevation, "get_with_retries", fake_get)
+    monkeypatch.setattr(elevation.settings, "elevation_fallback_enabled", False)
     elevation._cache.clear()
-    with pytest.raises(UpstreamDataError, match="No valid elevation"):
+    with pytest.raises(UpstreamDataError, match="No valid primary elevation"):
         await elevation.fetch_elevation_grid(18.5, 73.8, 0.5, grid_size=9)
 
 
@@ -101,3 +118,60 @@ async def test_public_endpoint_uses_quota_safe_grid_and_reports_degradation(monk
     assert calls == [100, 100, 100, 100, 100, 29]
     assert result.source.status == "degraded"
     assert "Public API quota limited" in result.source.message
+
+
+def test_slippy_pixel_maps_origin_to_center_of_world_tile():
+    assert elevation._slippy_pixel(0.0, 0.0, 0) == (0, 0, 128, 128)
+
+
+@pytest.mark.anyio
+async def test_elevation_uses_validated_terrarium_fallback(monkeypatch):
+    tile_payload = terrarium_png(275.5)
+
+    async def fake_get(url, params=None, headers=None):
+        del params, headers
+        if "open-meteo" in url:
+            return FakeResponse(status_code=503)
+        return FakeResponse(
+            status_code=200,
+            content=tile_payload,
+            headers={"content-type": "image/png"},
+        )
+
+    monkeypatch.setattr(elevation, "get_with_retries", fake_get)
+    monkeypatch.setattr(elevation.settings, "elevation_fallback_enabled", True)
+    monkeypatch.setattr(elevation.settings, "elevation_tile_zoom", 12)
+    monkeypatch.setattr(elevation.settings, "elevation_tile_max_count", 16)
+    monkeypatch.setattr(elevation.settings, "elevation_min_interval_seconds", 0.0)
+    elevation._cache.clear()
+
+    result = await elevation.fetch_elevation_grid(21.24, 81.29, 0.5, grid_size=9)
+
+    assert result.dem.shape == (9, 9)
+    assert np.allclose(result.dem, 275.5)
+    assert result.source.status == "degraded"
+    assert "Terrain Tiles" in result.source.name
+    assert "primary elevation batch" in result.source.message
+    assert result.source.license_url == "https://registry.opendata.aws/terrain-tiles/"
+
+
+@pytest.mark.anyio
+async def test_elevation_rejects_invalid_terrain_fallback(monkeypatch):
+    async def fake_get(url, params=None, headers=None):
+        del params, headers
+        if "open-meteo" in url:
+            return FakeResponse(status_code=503)
+        return FakeResponse(
+            status_code=200,
+            content=b"not-a-png",
+            headers={"content-type": "image/png"},
+        )
+
+    monkeypatch.setattr(elevation, "get_with_retries", fake_get)
+    monkeypatch.setattr(elevation.settings, "elevation_fallback_enabled", True)
+    monkeypatch.setattr(elevation.settings, "elevation_tile_zoom", 12)
+    monkeypatch.setattr(elevation.settings, "elevation_min_interval_seconds", 0.0)
+    elevation._cache.clear()
+
+    with pytest.raises(UpstreamDataError, match="fallback was also unavailable"):
+        await elevation.fetch_elevation_grid(21.24, 81.29, 0.5, grid_size=9)

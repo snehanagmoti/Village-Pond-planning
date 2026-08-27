@@ -7,7 +7,7 @@ The root `render.yaml` defines two free services in the Singapore region:
 - `sneha-village-pond-api-2026` - FastAPI web service;
 - `sneha-village-pond-planning-2026` - Vite/React static site.
 
-Expected public URLs:
+Active public URLs, deployed and verified on 26 August 2026:
 
 - frontend: `https://sneha-village-pond-planning-2026.onrender.com`
 - API: `https://sneha-village-pond-api-2026.onrender.com`
@@ -32,8 +32,18 @@ is not a site-approved engineering value. A production operator must replace it,
 confirm provider terms, and set the production gates described in
 `.env.example`.
 
+The API also enables a bounded Terrain Tiles fallback for elevation-provider
+outages. Keep the HTTPS template, zoom, tile-count limit, and byte limit explicit
+in production. Fallback results are source-labelled and degraded; they do not
+replace a field survey.
+
 Render free web services may sleep after inactivity. Allow time for the first
 API request to wake the backend before judging the endpoint.
+
+The recorded hosted verification returned HTTP 200 for the homepage, liveness
+endpoint, OpenAPI schema, and supplied KML upload. The KML request completed in
+6.66 seconds and returned 1,355 contours, 159,113 source vertices, a 148 x 181
+grid, and a 392.1225 ha catchment.
 
 Post-deploy checks:
 

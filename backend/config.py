@@ -84,6 +84,16 @@ class Settings:
         self.elevation_api_url = os.getenv(
             "ELEVATION_API_URL", "https://api.open-meteo.com/v1/elevation"
         ).strip()
+        self.elevation_fallback_enabled = _bool("ELEVATION_FALLBACK_ENABLED", True)
+        self.elevation_tile_url = os.getenv(
+            "ELEVATION_TILE_URL",
+            "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png",
+        ).strip()
+        self.elevation_tile_zoom = min(15, _int("ELEVATION_TILE_ZOOM", 12, 8))
+        self.elevation_tile_max_count = _int("ELEVATION_TILE_MAX_COUNT", 16, 1)
+        self.elevation_tile_max_bytes = _int(
+            "ELEVATION_TILE_MAX_BYTES", 2 * 1024 * 1024, 1024
+        )
         self.rainfall_api_url = os.getenv(
             "RAINFALL_API_URL", "https://archive-api.open-meteo.com/v1/archive"
         ).strip()
@@ -242,6 +252,13 @@ class Settings:
                 )
             if not self.elevation_api_url.startswith("https://"):
                 errors.append("ELEVATION_API_URL must use HTTPS in production")
+            if self.elevation_fallback_enabled:
+                if not self.elevation_tile_url.startswith("https://"):
+                    errors.append("ELEVATION_TILE_URL must use HTTPS in production")
+                if not all(
+                    token in self.elevation_tile_url for token in ("{z}", "{x}", "{y}")
+                ):
+                    errors.append("ELEVATION_TILE_URL must contain {z}, {x}, and {y}")
             if not self.rainfall_api_url.startswith("https://"):
                 errors.append("RAINFALL_API_URL must use HTTPS in production")
             if self.history_enabled and not self.database_credentials_configured:

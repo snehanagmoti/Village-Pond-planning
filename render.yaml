@@ -31,6 +31,12 @@ services:
         value: "45"
       - key: OPEN_METEO_USE_AUTHORIZED
         value: "false"
+      - key: ELEVATION_FALLBACK_ENABLED
+        value: "true"
+      - key: ELEVATION_TILE_URL
+        value: https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png
+      - key: ELEVATION_TILE_ZOOM
+        value: "12"
       - key: IMAGERY_USE_AUTHORIZED
         value: "false"
       - key: APPROVED_RUNOFF_COEFFICIENT

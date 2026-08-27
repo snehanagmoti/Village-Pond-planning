@@ -15,11 +15,11 @@ quality limitations instead of inventing convincing fallback values.
 ## Submission links
 
 - GitHub: <https://github.com/snehanagmoti/Village-Pond-planning>
-- Render frontend (after Blueprint deployment):
+- Live Render frontend:
   <https://sneha-village-pond-planning-2026.onrender.com>
-- Render API (after Blueprint deployment):
+- Live Render API:
   <https://sneha-village-pond-api-2026.onrender.com>
-- Interactive API documentation (after Blueprint deployment):
+- Live interactive API documentation:
   <https://sneha-village-pond-api-2026.onrender.com/docs>
 - Final report source: [Final_Technical_Report.md](Final_Technical_Report.md)
 - API reference: [docs/API.md](docs/API.md)
@@ -50,6 +50,8 @@ quality limitations instead of inventing convincing fallback values.
 
 - satellite map with click, coordinate, and explicit place-search selection;
 - radius-aware elevation grid and hydrologic screening;
+- bounded, validated Terrarium terrain-tile fallback when the primary elevation
+  provider rejects the deployment host;
 - historical ERA5-Land rainfall climatology with valid-year accounting;
 - satellite RGB/HSV surface screening labelled as a candidate only;
 - annual runoff only when an approved coefficient and source are configured;
@@ -71,7 +73,7 @@ React + Leaflet static frontend
     |                              `-- shared D8 hydrology
     |
     `-- location/radius JSON ---> FastAPI live-source analysis route
-                                   |-- Open-Meteo elevation
+                                   |-- Open-Meteo elevation + bounded tile fallback
                                    |-- Open-Meteo ERA5-Land rainfall
                                    |-- configurable imagery tiles + OpenCV
                                    `-- runoff and pond screening

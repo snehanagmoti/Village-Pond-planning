@@ -127,6 +127,13 @@ catchment and candidate polygons, rainfall climatology, surface-screening
 ratios, runoff values when an approved coefficient is configured, optional pond
 geometry, warnings, and persistence status.
 
+Elevation acquisition first uses the configured point API. If that provider is
+unavailable, the service can use a bounded HTTPS fallback backed by Terrarium-
+encoded Terrain Tiles. Tile count, response size, PNG type, dimensions,
+channels, decoded range, and coverage are validated; fallback results are
+labelled degraded with their own source URL and are never presented as survey
+data.
+
 ## Place search
 
 ### `GET /api/search-village?q=<query>`
