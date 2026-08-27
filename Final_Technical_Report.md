@@ -8,7 +8,7 @@
 
 **Submission phase:** Phase 3 - Final implementation and demonstration
 
-**Date:** 26 August 2026
+**Date:** 28 August 2026
 
 **Repository:** https://github.com/snehanagmoti/Village-Pond-planning
 
@@ -38,7 +38,7 @@ design, and statutory approval.
 | Contour visualization | Live DEM contour overlays and uploaded contour study boundary |
 | Suitable/available land | Conservative bare-surface candidate; ownership explicitly unverified |
 | Catchment area | Priority-flood conditioning, D8 routing, reverse catchment traversal, area in ha |
-| Historical rainfall | Configurable 1991-2025 ERA5-Land daily data aggregated by complete year |
+| Historical rainfall | Complete-year Open-Meteo ERA5-Land analysis with a validated NASA POWER fallback |
 | Runoff volume | `V = C x A x P` with visible coefficient and documentary basis |
 | Pond depth/capacity | Side-sloped rectangular-frustum screening geometry with freeboard |
 | Selected point and maps | Leaflet point, catchment, study area, candidate land and contour layers |
@@ -133,7 +133,7 @@ elevation is stored in the implementation.
 
 ### 4.4 Provided-map result
 
-The supplied `contours_1m.kml` was processed through the real service code on 26
+The supplied `contours_1m.kml` was processed through the deployed service on 28
 August 2026. The measured output was:
 
 | Metric | Result |
@@ -164,6 +164,14 @@ targets approximately 90 m cells, subject to configured limits. The public API
 path is capped at 23 x 23 locations to remain below its public request allowance;
 the response is marked degraded when this cap is coarser than the target.
 
+If the point API fails or returns insufficient coverage, the backend uses a
+bounded Terrain Tiles fallback rather than fabricating elevations. The fallback
+downloads only the required HTTPS Terrarium PNG tiles and validates tile count,
+response size, media type, dimensions, channels, decoded elevation range, and
+coverage. Terrarium values are decoded as
+`(red x 256 + green + blue / 256) - 32768`. The result identifies the AWS Open
+Data/Tilezen source, reports its own resolution, and is always marked degraded.
+
 Every batch is checked for matching length, numeric range, finite coverage, and
 final shape. The system does not fill a failed batch with synthetic terrain. A
 small percentage of isolated missing cells can be locally interpolated, while
@@ -177,12 +185,17 @@ vertical error can materially change real drainage.
 
 ## 6. Rainfall analysis
 
-The default period is 1991-2025 and the default model is ERA5-Land. This is a
-reanalysis product, not a village rain gauge. Daily non-negative precipitation
-is grouped by calendar year. Only years containing every expected day are used,
-so missing dates cannot reduce a total as if they were zero rainfall. Monthly
-means include the number of contributing complete years, and source status
-depends on the configured minimum valid-year threshold.
+The default period is 1991-2025 and the primary model is ERA5-Land through
+Open-Meteo. When that service is rate-limited or returns insufficient complete
+years, the backend requests `PRECTOTCORR` from NASA POWER. The fallback is
+identified as MERRA-2 corrected precipitation and marked degraded because its
+0.5 by 0.625 degree grid is not a village rain gauge.
+
+For both sources, daily non-negative precipitation is grouped by calendar year.
+Only years containing every expected date are used, so gaps cannot reduce a
+total as if they were zero rainfall. Response size, sentinel values, date/value
+alignment, numerical range, complete-year count, and coverage are validated.
+Monthly means state their contributing complete-year count.
 
 Mean annual rainfall supports screening water yield. It is not a design storm
 and cannot size a spillway or establish flood safety.
@@ -287,8 +300,8 @@ The final local quality matrix includes:
 
 | Gate | Result |
 | --- | --- |
-| Backend Pytest suite | 56 passed |
-| Backend statement coverage | 82.08%, above 70% CI threshold |
+| Backend Pytest suite | 60 passed |
+| Backend statement coverage | 81.99%, above 70% CI threshold |
 | Python Ruff lint | Passed |
 | Python dependency consistency | `pip check` passed |
 | Python vulnerability audit | 0 known vulnerabilities |
@@ -302,6 +315,11 @@ The final local quality matrix includes:
 | Docker backend build | Included in local/CI verification |
 | Docker frontend build | Included in local/CI verification |
 | Alembic PostgreSQL migration | Included in GitHub Actions |
+| GitHub Actions CI on deployed commit `e782496` | Passed |
+| Hosted frontend and security headers | HTTP 200; frame, MIME and referrer headers passed |
+| Hosted API liveness and OpenAPI | HTTP 200 |
+| Hosted supplied-KML upload | HTTP 200 in 6.89 s; 392.1225 ha catchment |
+| Hosted 2 km location analysis | 35 rainfall years; 1,190.0826 ha catchment; pond branch returned |
 
 Backend tests cover contour/KMZ safety, parsing variants, KML route behavior,
 input limits, D8 flow, accumulation, catchment traversal, priority-flood,
@@ -313,15 +331,23 @@ rainfall rendering, select-then-confirm analysis, and the KML upload contract.
 ## 13. Deployment and submission
 
 The repository contains `render.yaml` for repeatable deployment in the Singapore
-region. The configured endpoints are:
+region. The following endpoints were deployed and verified on 28 August 2026:
 
 - Frontend: https://sneha-village-pond-planning-2026.onrender.com
 - API: https://sneha-village-pond-api-2026.onrender.com
 - API documentation: https://sneha-village-pond-api-2026.onrender.com/docs
 
 Free Render web services can sleep after inactivity, so the first API request
-may require a cold-start wait. Docker deployment and post-deploy checks are
-documented separately in `docs/DEPLOYMENT.md`.
+may require a cold-start wait. The hosted KML verification processed all 1,355
+contours and 159,113 source vertices in 6.89 seconds, returning the same
+392.1225 ha catchment and candidate coordinates as local and Docker tests.
+The final hosted location test also exercised the fallback rainfall and complete
+pond paths: 35 complete rainfall years, 1,324.16 mm mean annual rainfall, a
+1,190.0826 ha modelled catchment, 4,727,579.5 m3 screening runoff, and a pond
+candidate. Its degraded quality status and field-verification warnings are
+intentional and visible to the user.
+Docker deployment and post-deploy checks are documented separately in
+`docs/DEPLOYMENT.md`.
 
 ## 14. Limitations and required field work
 
@@ -370,3 +396,6 @@ that require cadastral, survey, environmental, and engineering authority.
 5. Leaflet documentation: https://leafletjs.com/reference.html
 6. OpenCV documentation: https://docs.opencv.org/
 7. Render Blueprint specification: https://render.com/docs/blueprint-spec
+8. AWS Open Data Terrain Tiles: https://registry.opendata.aws/terrain-tiles/
+9. Tilezen Terrarium format: https://github.com/tilezen/joerd/blob/master/docs/formats.md
+10. NASA POWER Daily API: https://power.larc.nasa.gov/docs/services/api/temporal/daily/

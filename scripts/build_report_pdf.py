@@ -312,7 +312,7 @@ def cover_story():
             [Paragraph("FINAL TECHNICAL REPORT", STYLES["h2"])],
             [Paragraph("Assignment 1 | Phase 3 submission", STYLES["cover_meta"])],
             [Paragraph("Student: <b>Sneha Nagmoti</b>", STYLES["cover_meta"])],
-            [Paragraph("Date: 26 August 2026", STYLES["cover_meta"])],
+            [Paragraph("Date: 28 August 2026", STYLES["cover_meta"])],
             [Paragraph("github.com/snehanagmoti/Village-Pond-planning", STYLES["cover_meta"])],
         ],
         colWidths=[136 * mm],
