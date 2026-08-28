@@ -63,7 +63,7 @@ services:
       - key: VITE_API_BASE_URL
         value: https://sneha-village-pond-api-2026.onrender.com/api
       - key: VITE_API_TIMEOUT_MS
-        value: "180000"
+        value: "300000"
       - key: VITE_IMAGERY_TILE_URL
         value: https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}
       - key: VITE_IMAGERY_ATTRIBUTION

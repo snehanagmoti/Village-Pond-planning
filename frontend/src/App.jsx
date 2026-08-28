@@ -458,7 +458,14 @@ export default function App() {
           <span className={`status-indicator ${loading ? 'processing' : error ? 'error' : analysis || contourAnalysis ? 'complete' : ''}`} aria-hidden="true" />
           <div><span className="status-label">Workspace status</span><p>{status}</p></div>
         </div>
-        {loading && <div className="loading-box" role="status"><span className="spinner" aria-hidden="true" /><span>Checking source coverage and computing the watershed…</span></div>}
+        {loading && (
+          <div className="loading-box" role="status">
+            <span className="spinner" aria-hidden="true" />
+            <span>{workflowMode === 'contour'
+              ? 'Reconstructing the terrain and catchment… Large contour files may take up to five minutes.'
+              : 'Checking source coverage and computing the watershed…'}</span>
+          </div>
+        )}
         {error && <div className="error-box" role="alert"><p>{error}</p><button className="text-btn" type="button" onClick={contourFile && !position ? runContourAnalysis : runAnalysis}>Try again</button></div>}
 
         {contourAnalysis && (

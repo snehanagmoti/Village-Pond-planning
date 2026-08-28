@@ -1,10 +1,17 @@
 import axios from 'axios';
 
 const baseURL = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
-const configuredTimeout = Number(import.meta.env.VITE_API_TIMEOUT_MS || 60000);
-const timeout = Number.isFinite(configuredTimeout) && configuredTimeout >= 1000
-  ? Math.min(configuredTimeout, 120000)
-  : 60000;
+export const DEFAULT_API_TIMEOUT_MS = 60000;
+export const MAX_API_TIMEOUT_MS = 300000;
+
+export function normalizeApiTimeout(value) {
+  const configuredTimeout = Number(value);
+  return Number.isFinite(configuredTimeout) && configuredTimeout >= 1000
+    ? Math.min(configuredTimeout, MAX_API_TIMEOUT_MS)
+    : DEFAULT_API_TIMEOUT_MS;
+}
+
+const timeout = normalizeApiTimeout(import.meta.env.VITE_API_TIMEOUT_MS || DEFAULT_API_TIMEOUT_MS);
 
 export const api = axios.create({
   baseURL,
