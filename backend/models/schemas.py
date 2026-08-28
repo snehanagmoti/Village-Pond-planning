@@ -163,7 +163,13 @@ class ContourGrid(APIModel):
 
 class ContourPondLocation(Coordinates):
     elevation_m: float
+    boundary_distance_m: float = Field(..., ge=0)
     selection_method: str
+
+
+class ContourOutletLocation(Coordinates):
+    elevation_m: float
+    contributing_cells: int = Field(..., ge=1)
 
 
 class ContourCatchment(APIModel):
@@ -181,8 +187,13 @@ class ContourAnalysisResponse(APIModel):
     contour_summary: ContourSummary
     grid: ContourGrid
     pond_location: ContourPondLocation
+    outlet_location: ContourOutletLocation
     catchment: ContourCatchment
+    contours: List[ContourLine] = Field(default_factory=list)
+    drainage_path: List[Coordinates] = Field(default_factory=list)
     study_area_boundary: List[Coordinates] = Field(..., min_length=3)
+    study_boundary_source: Literal["uploaded_polygon", "derived_extent"]
+    candidate_boundary_setback_m: float = Field(..., ge=0)
     quality: AnalysisQuality
 
 

@@ -77,6 +77,11 @@ def test_kml_analysis_derives_structured_catchment_without_hard_coded_site():
     assert result["catchment"]["area_sqm"] > 0
     assert result["catchment"]["cell_count"] >= 3
     assert len(result["catchment"]["boundary"]) >= 3
+    assert result["study_boundary_source"] == "uploaded_polygon"
+    assert result["pond_location"]["boundary_distance_m"] >= result["candidate_boundary_setback_m"]
+    assert result["pond_location"]["lat"] != result["outlet_location"]["lat"]
+    assert len(result["contours"]) > 0
+    assert len(result["drainage_path"]) >= 2
     assert result["quality"]["screening_only"] is True
 
 

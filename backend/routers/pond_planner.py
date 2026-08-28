@@ -34,6 +34,7 @@ from services.cv_analyzer import (
     analyze_satellite_image,
     contour_to_polygon,
     download_satellite_mosaic,
+    raster_mask_to_terrain_grid,
 )
 from services.elevation import fetch_elevation_grid
 from services.geocoding import search_village
@@ -175,6 +176,8 @@ async def analyze_location(payload: AnalysisRequest, http_request: Request) -> A
     if elevation_result.source.message:
         warnings.append(elevation_result.source.message)
     candidate_polygon_raw: list[dict] = []
+    candidate_land_grid = None
+    water_exclusion_grid = None
     land_result: LandCoverResult | None = None
 
     if isinstance(imagery_result, Exception):
@@ -189,6 +192,14 @@ async def analyze_location(payload: AnalysisRequest, http_request: Request) -> A
             if land_result.candidate_contour is not None:
                 candidate_polygon_raw = contour_to_polygon(
                     land_result.candidate_contour, imagery_result.bounds, imagery_result.image.shape
+                )
+            if land_result.candidate_mask is not None:
+                candidate_land_grid = raster_mask_to_terrain_grid(
+                    land_result.candidate_mask, elevation_result.dem.shape
+                )
+            if land_result.water_mask is not None:
+                water_exclusion_grid = raster_mask_to_terrain_grid(
+                    land_result.water_mask, elevation_result.dem.shape
                 )
             land_source = SourceInfo(
                 name="RGB/HSV land-cover screening",
@@ -225,6 +236,8 @@ async def analyze_location(payload: AnalysisRequest, http_request: Request) -> A
             elevation_result.latitudes,
             elevation_result.longitudes,
             candidate_polygon_raw,
+            candidate_land_mask=candidate_land_grid,
+            candidate_exclusion_mask=water_exclusion_grid,
         )
     except AnalysisValidationError as exc:
         raise HTTPException(

@@ -265,6 +265,40 @@ def extract_contours(
     return output
 
 
+def _distance_from_mask_boundary(mask: np.ndarray, cell_size_m: float) -> np.ndarray:
+    """Return distance inside a mask, with boundary cells defined as zero metres."""
+    padded = np.pad(mask.astype(np.uint8), 1, mode="constant", constant_values=0)
+    pixel_distance = cv2.distanceTransform(padded, cv2.DIST_L2, 5)[1:-1, 1:-1]
+    return np.maximum(0.0, pixel_distance - 1.0) * cell_size_m
+
+
+def trace_downstream_path(
+    flow_direction: np.ndarray,
+    start_row: int,
+    start_col: int,
+    lat_array: np.ndarray,
+    lng_array: np.ndarray,
+) -> List[Dict[str, float]]:
+    """Trace a bounded D8 path from a candidate cell to its terminal outlet."""
+    rows, cols = flow_direction.shape
+    row, col = start_row, start_col
+    visited: set[tuple[int, int]] = set()
+    path: List[Dict[str, float]] = []
+    for _ in range(rows * cols):
+        if (row, col) in visited:
+            break
+        visited.add((row, col))
+        path.append({"lat": float(lat_array[row]), "lng": float(lng_array[col])})
+        direction = int(flow_direction[row, col])
+        if direction < 0:
+            break
+        next_row, next_col = row + DR[direction], col + DC[direction]
+        if not (0 <= next_row < rows and 0 <= next_col < cols):
+            break
+        row, col = next_row, next_col
+    return path
+
+
 def polygon_area_sqm(coords: List[Dict[str, float]]) -> float:
     if len(coords) < 3:
         return 0.0
@@ -390,6 +424,9 @@ def run_terrain_analysis(
     lng_array: np.ndarray,
     candidate_land_polygon: Optional[List[Dict[str, float]]] = None,
     analysis_mask: Optional[np.ndarray] = None,
+    candidate_land_mask: Optional[np.ndarray] = None,
+    candidate_exclusion_mask: Optional[np.ndarray] = None,
+    candidate_boundary_setback_m: float = 75.0,
 ) -> Dict:
     if dem.ndim != 2 or dem.shape != (len(lat_array), len(lng_array)):
         raise AnalysisValidationError("DEM shape must match the latitude and longitude axes")
@@ -431,12 +468,31 @@ def run_terrain_analysis(
     if len(catchment_polygon) < 3:
         raise AnalysisValidationError("Computed watershed boundary is invalid")
 
-    land_mask = polygon_to_mask(candidate_land_polygon or [], lat_array, lng_array)
-    candidate_mask = catchment_mask & land_mask
+    if candidate_land_mask is None:
+        land_mask = polygon_to_mask(candidate_land_polygon or [], lat_array, lng_array)
+    else:
+        land_mask = np.asarray(candidate_land_mask, dtype=bool)
+        if land_mask.shape != dem.shape:
+            raise AnalysisValidationError("Candidate land mask must match the DEM")
+    exclusions = np.zeros(dem.shape, dtype=bool)
+    if candidate_exclusion_mask is not None:
+        exclusions = np.asarray(candidate_exclusion_mask, dtype=bool)
+        if exclusions.shape != dem.shape:
+            raise AnalysisValidationError("Candidate exclusion mask must match the DEM")
+
+    raw_candidate_mask = catchment_mask & land_mask & ~exclusions
+    boundary_distance_m = _distance_from_mask_boundary(valid_mask, math.sqrt(cell_area_sqm))
+    candidate_mask = (
+        raw_candidate_mask
+        & (flow_direction >= 0)
+        & (boundary_distance_m >= max(0.0, candidate_boundary_setback_m))
+    )
     candidate_cells = int(np.sum(candidate_mask))
     pond_location = None
+    drainage_path: List[Dict[str, float]] = []
     if candidate_cells > 0:
-        # Prefer drainage concentration, then lower elevation among ties.
+        # Prefer drainage concentration only after removing outlets, excluded
+        # surfaces and the configured analysis-edge setback.
         candidate_accumulation = np.where(candidate_mask, accumulation, -1)
         maximum = np.max(candidate_accumulation)
         rows, cols = np.where(candidate_mask & (accumulation == maximum))
@@ -446,7 +502,9 @@ def run_terrain_analysis(
             "lat": float(lat_array[row]),
             "lng": float(lng_array[col]),
             "elevation": float(dem[row, col]),
+            "boundary_distance_m": float(boundary_distance_m[row, col]),
         }
+        drainage_path = trace_downstream_path(flow_direction, row, col, lat_array, lng_array)
 
     warnings = []
     filled_ratio = float(np.mean(fill_depth[valid_mask] > 1e-6))
@@ -455,8 +513,12 @@ def run_terrain_analysis(
         warnings.append(
             f"DEM depression filling modified {filled_ratio * 100:.1f}% of cells (maximum {maximum_fill:.1f} m); field validation is required."
         )
-    if candidate_cells == 0:
-        warnings.append("No detected bare-surface candidate overlaps the computed watershed; no pond location was produced.")
+    if int(np.sum(raw_candidate_mask)) > 0 and candidate_cells == 0:
+        warnings.append(
+            "Candidate land overlaps the watershed, but no cell remains after water/exclusion masks and the analysis-boundary setback."
+        )
+    elif candidate_cells == 0:
+        warnings.append("No eligible candidate land overlaps the computed watershed; no pond location was produced.")
 
     return {
         "catchment_polygon": catchment_polygon,
@@ -466,6 +528,14 @@ def run_terrain_analysis(
         "catchment_ratio": catchment_ratio,
         "candidate_area_sqm": candidate_cells * cell_area_sqm,
         "pond_location": pond_location,
+        "outlet_location": {
+            "lat": float(lat_array[pour_row]),
+            "lng": float(lng_array[pour_col]),
+            "elevation": float(dem[pour_row, pour_col]),
+            "contributing_cells": int(accumulation[pour_row, pour_col]),
+        },
+        "drainage_path": drainage_path,
+        "candidate_boundary_setback_m": max(0.0, float(candidate_boundary_setback_m)),
         "warnings": warnings,
         "elevation_stats": {
             "min_elevation": round(float(np.min(dem)), 1),

@@ -212,4 +212,33 @@ class TestProductionHydrology:
         assert result["catchment_area_sqm"] > 0
         assert result["candidate_area_sqm"] == 0
         assert result["pond_location"] is None
-        assert any("No detected bare-surface" in warning for warning in result["warnings"])
+        assert any("No eligible candidate land" in warning for warning in result["warnings"])
+
+    def test_candidate_is_separate_from_boundary_outlet(self):
+        rows = cols = 21
+        row_slope = np.arange(rows, dtype=float)[:, None] * 10.0
+        valley = np.abs(np.arange(cols, dtype=float) - cols // 2)[None, :]
+        dem = row_slope + valley
+        latitudes = np.linspace(18.0, 18.01, rows)
+        longitudes = np.linspace(73.0, 73.01, cols)
+        study_polygon = [
+            {"lat": 18.0, "lng": 73.0},
+            {"lat": 18.0, "lng": 73.01},
+            {"lat": 18.01, "lng": 73.01},
+            {"lat": 18.01, "lng": 73.0},
+        ]
+
+        result = run_terrain_analysis(
+            dem,
+            latitudes,
+            longitudes,
+            study_polygon,
+            analysis_mask=np.ones(dem.shape, dtype=bool),
+            candidate_boundary_setback_m=75.0,
+        )
+
+        assert result["outlet_location"]["lat"] == pytest.approx(latitudes[0])
+        assert result["pond_location"]["lat"] > result["outlet_location"]["lat"]
+        assert result["pond_location"]["boundary_distance_m"] >= 75.0
+        assert result["drainage_path"][0]["lat"] == pytest.approx(result["pond_location"]["lat"])
+        assert result["drainage_path"][-1]["lat"] == pytest.approx(result["outlet_location"]["lat"])

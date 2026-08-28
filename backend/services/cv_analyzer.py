@@ -36,6 +36,8 @@ class LandCoverResult:
     candidate_contour: Optional[np.ndarray]
     status: str
     message: str
+    candidate_mask: Optional[np.ndarray] = None
+    water_mask: Optional[np.ndarray] = None
 
 
 def _lat_lng_to_tile(lat: float, lng: float, zoom: int) -> Tuple[int, int]:
@@ -179,7 +181,12 @@ def analyze_satellite_image(image: np.ndarray) -> LandCoverResult:
     sand = cv2.inRange(hsv, np.array([15, 18, 110]), np.array([38, 170, 255]))
     bare = cv2.bitwise_or(brown, sand)
     bare = cv2.bitwise_and(bare, cv2.bitwise_not(vegetation))
-    bare = cv2.bitwise_and(bare, cv2.bitwise_not(water))
+    # Maintain a conservative buffer around pixels classified as water. This
+    # does not prove that all rivers are detected, but prevents known water
+    # pixels from being reintroduced when the candidate polygon is simplified.
+    water_buffer_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    buffered_water = cv2.dilate(water, water_buffer_kernel)
+    bare = cv2.bitwise_and(bare, cv2.bitwise_not(buffered_water))
 
     low_saturation = cv2.inRange(hsv, np.array([0, 0, 75]), np.array([180, 45, 230]))
     low_saturation = cv2.bitwise_and(low_saturation, cv2.bitwise_not(water))
@@ -200,6 +207,11 @@ def analyze_satellite_image(image: np.ndarray) -> LandCoverResult:
     minimum_region_area = total * 0.0025
     candidates = [contour for contour in contours if cv2.contourArea(contour) >= minimum_region_area]
     largest = max(candidates, key=cv2.contourArea) if candidates else None
+    candidate_mask = None
+    if largest is not None:
+        candidate_mask = np.zeros_like(bare)
+        cv2.drawContours(candidate_mask, [largest], -1, 255, thickness=cv2.FILLED)
+        candidate_mask = cv2.bitwise_and(candidate_mask, bare)
 
     return LandCoverResult(
         bare_surface_ratio=round(bare_ratio, 4),
@@ -208,8 +220,22 @@ def analyze_satellite_image(image: np.ndarray) -> LandCoverResult:
         low_saturation_surface_ratio=round(low_saturation_ratio, 4),
         candidate_contour=largest,
         status="degraded",
-        message="RGB/HSV screening cannot establish ownership, soil suitability, structures, crops, or legal availability",
+        message=(
+            "RGB/HSV screening applies a conservative pixel buffer around detected water, but cannot establish "
+            "ownership, soil suitability, structures, crops, legal availability, or complete river detection"
+        ),
+        candidate_mask=candidate_mask,
+        water_mask=water,
     )
+
+
+def raster_mask_to_terrain_grid(mask: np.ndarray, grid_shape: Tuple[int, int]) -> np.ndarray:
+    """Align a north-up imagery mask to the DEM's south-to-north row order."""
+    if mask is None or mask.ndim != 2 or len(grid_shape) != 2 or min(grid_shape) < 3:
+        raise ValueError("A two-dimensional imagery mask and valid terrain shape are required")
+    rows, cols = grid_shape
+    resized = cv2.resize(mask, (cols, rows), interpolation=cv2.INTER_NEAREST)
+    return np.flipud(resized > 0).copy()
 
 
 def contour_to_polygon(

@@ -400,6 +400,7 @@ def analyze_contour_file(document: bytes, filename: str) -> dict:
     """Return structured catchment information derived only from the upload."""
     dataset, input_format = parse_contour_document(document, filename)
     dem, latitudes, longitudes, analysis_mask, grid = interpolate_contour_dem(dataset)
+    study_boundary_source = "uploaded_polygon" if dataset.boundary else "derived_extent"
     if dataset.boundary:
         site_polygon = [
             {"lng": longitude, "lat": latitude}
@@ -428,7 +429,8 @@ def analyze_contour_file(document: bytes, filename: str) -> dict:
     levels = sorted({round(line.elevation, 6) for line in dataset.lines})
     warnings = [
         "The elevation grid is interpolated from uploaded contour lines; verify the result against the original survey or DEM.",
-        "The pond point is selected from terrain drainage concentration only; ownership, soils, structures and excavation suitability are not verified.",
+        "The uploaded polygon is used as an analysis extent, not as proof that every enclosed cell is buildable or suitable for a pond.",
+        "The interior pond point is selected from terrain drainage concentration only; rivers, permanent water, ownership, soils, structures and excavation suitability are not verified by a contour-only upload.",
         "The catchment is limited to the uploaded contour coverage and may omit drainage from outside the map boundary.",
     ]
     if not dataset.boundary:
@@ -441,6 +443,7 @@ def analyze_contour_file(document: bytes, filename: str) -> dict:
     warnings = list(dict.fromkeys(warnings))
 
     pond = terrain["pond_location"]
+    outlet = terrain["outlet_location"]
     safe_filename = Path(filename).name or "upload.kml"
     if len(safe_filename) > 255:
         suffix = Path(safe_filename).suffix[-15:]
@@ -465,7 +468,18 @@ def analyze_contour_file(document: bytes, filename: str) -> dict:
             "lat": round(float(pond["lat"]), 6),
             "lng": round(float(pond["lng"]), 6),
             "elevation_m": round(float(pond["elevation"]), 3),
-            "selection_method": "Maximum D8 contributing area within the uploaded study boundary, with lower elevation as tie-breaker",
+            "boundary_distance_m": round(float(pond["boundary_distance_m"]), 2),
+            "selection_method": (
+                "Highest D8 contributing area after excluding the hydrologic outlet and "
+                f"the first {terrain['candidate_boundary_setback_m']:.0f} m inside the analysis boundary; "
+                "lower elevation is the tie-breaker"
+            ),
+        },
+        "outlet_location": {
+            "lat": round(float(outlet["lat"]), 6),
+            "lng": round(float(outlet["lng"]), 6),
+            "elevation_m": round(float(outlet["elevation"]), 3),
+            "contributing_cells": int(outlet["contributing_cells"]),
         },
         "catchment": {
             "area_sqm": round(float(terrain["catchment_area_sqm"]), 2),
@@ -474,7 +488,11 @@ def analyze_contour_file(document: bytes, filename: str) -> dict:
             "study_grid_fraction": round(float(terrain["catchment_ratio"]), 5),
             "boundary": terrain["catchment_polygon"],
         },
+        "contours": terrain["contours"],
+        "drainage_path": terrain["drainage_path"],
         "study_area_boundary": site_polygon,
+        "study_boundary_source": study_boundary_source,
+        "candidate_boundary_setback_m": terrain["candidate_boundary_setback_m"],
         "quality": {
             "status": "degraded",
             "screening_only": True,

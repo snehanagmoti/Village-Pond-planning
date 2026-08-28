@@ -3,7 +3,11 @@ import numpy as np
 import pytest
 
 from services import cv_analyzer
-from services.cv_analyzer import analyze_satellite_image, contour_to_polygon
+from services.cv_analyzer import (
+    analyze_satellite_image,
+    contour_to_polygon,
+    raster_mask_to_terrain_grid,
+)
 from services.quality import UpstreamDataError
 
 
@@ -22,6 +26,32 @@ def test_bare_surface_contour_maps_to_bounds():
         polygon = contour_to_polygon(result.candidate_contour, (18.0, 18.1, 73.0, 73.1), image.shape)
         assert len(polygon) >= 3
         assert all(18.0 <= point["lat"] <= 18.1 for point in polygon)
+
+
+def test_detected_water_is_buffered_out_of_candidate_mask():
+    image = np.full((256, 256, 3), (70, 120, 175), dtype=np.uint8)
+    cv2.line(image, (128, 0), (128, 255), (150, 55, 20), 12)
+
+    result = analyze_satellite_image(image)
+
+    assert result.water_mask is not None
+    assert cv2.countNonZero(result.water_mask) > 0
+    if result.candidate_mask is not None:
+        buffered_water = cv2.dilate(
+            result.water_mask,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)),
+        )
+        assert cv2.countNonZero(cv2.bitwise_and(result.candidate_mask, buffered_water)) == 0
+
+
+def test_imagery_mask_is_flipped_to_dem_latitude_order():
+    mask = np.zeros((6, 6), dtype=np.uint8)
+    mask[0, :] = 255
+
+    grid = raster_mask_to_terrain_grid(mask, (3, 3))
+
+    assert np.all(grid[-1, :])
+    assert not np.any(grid[0, :])
 
 
 @pytest.mark.anyio

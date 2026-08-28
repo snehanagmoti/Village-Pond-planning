@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  Circle,
   MapContainer,
   Marker,
   Polygon,
@@ -24,6 +25,7 @@ import iconShadow from 'leaflet/dist/images/marker-shadow.png';
 const DefaultIcon = L.icon({ iconUrl, shadowUrl: iconShadow, iconSize: [25, 41], iconAnchor: [12, 41] });
 L.Marker.prototype.options.icon = DefaultIcon;
 const PondIcon = L.divIcon({ html: '<span class="pond-marker" aria-hidden="true"></span>', className: '', iconSize: [22, 22], iconAnchor: [11, 11] });
+const OutletIcon = L.divIcon({ html: '<span class="outlet-marker" aria-hidden="true"></span>', className: '', iconSize: [20, 20], iconAnchor: [10, 10] });
 const imageryTileUrl = import.meta.env.VITE_IMAGERY_TILE_URL
   || 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
 const imageryAttribution = import.meta.env.VITE_IMAGERY_ATTRIBUTION
@@ -57,6 +59,28 @@ function FlyTo({ center }) {
 }
 
 
+function FitEvidence({ points, panelOpen }) {
+  const map = useMap();
+  const pointsKey = JSON.stringify(points.filter((point) => Array.isArray(point) && point.length === 2));
+  useEffect(() => {
+    const validPoints = JSON.parse(pointsKey);
+    if (validPoints.length < 2) return undefined;
+    const timer = window.setTimeout(() => {
+      map.invalidateSize?.();
+      const desktopPanelPadding = panelOpen && window.innerWidth > 760 ? 520 : 44;
+      map.fitBounds(validPoints, {
+        paddingTopLeft: [44, 72],
+        paddingBottomRight: [desktopPanelPadding, 54],
+        maxZoom: 15,
+        animate: true,
+      });
+    }, 280);
+    return () => window.clearTimeout(timer);
+  }, [map, panelOpen, pointsKey]);
+  return null;
+}
+
+
 const polygonPositions = (polygon = []) => polygon.map((point) => [point.lat, point.lng]);
 const numberOrDash = (value, digits = 1) => value == null ? '—' : Number(value).toLocaleString(undefined, { maximumFractionDigits: digits });
 const MAX_CONTOUR_FILE_BYTES = 15 * 1024 * 1024;
@@ -86,6 +110,7 @@ const hasContourContract = (value) => Boolean(
 
 
 export default function App() {
+  const [panelOpen, setPanelOpen] = useState(true);
   const [workflowMode, setWorkflowMode] = useState('location');
   const [position, setPosition] = useState(null);
   const [villageName, setVillageName] = useState(null);
@@ -98,6 +123,14 @@ export default function App() {
   const [error, setError] = useState('');
   const [status, setStatus] = useState('Select a location, review the radius, then start the screening analysis.');
   const [flyTarget, setFlyTarget] = useState(null);
+  const [visibleLayers, setVisibleLayers] = useState({
+    catchment: true,
+    contours: true,
+    candidate: true,
+    study: true,
+    drainage: true,
+    points: true,
+  });
   const analysisAbortRef = useRef(null);
   const analysisSequenceRef = useRef(0);
 
@@ -273,8 +306,17 @@ export default function App() {
     return `hsl(${260 - ratio * 55} 75% 66%)`;
   };
 
+  const toggleLayer = (layer) => {
+    setVisibleLayers((current) => ({ ...current, [layer]: !current[layer] }));
+  };
+  const fitPoints = contourAnalysis?.study_area_boundary?.length >= 3
+    ? polygonPositions(contourAnalysis.study_area_boundary)
+    : analysis?.catchment_polygon?.length >= 3
+      ? polygonPositions(analysis.catchment_polygon)
+      : [];
+
   return (
-    <main className="app-container" aria-busy={loading}>
+    <main className={`app-container ${panelOpen ? '' : 'panel-collapsed'}`} aria-busy={loading}>
       <section className="map-container" aria-label="Satellite map and analysis layers">
         <div className="map-hud" aria-hidden="true">
           <span className="map-hud-kicker">Satellite intelligence workspace</span>
@@ -287,23 +329,33 @@ export default function App() {
             attribution={imageryAttribution}
           />
           <FlyTo center={flyTarget} />
+          <FitEvidence points={fitPoints} panelOpen={panelOpen} />
           <SelectionMarker position={position} onSelect={selectLocation} />
-          {analysis?.catchment_polygon?.length >= 3 && (
+          {position && visibleLayers.study && (
+            <Circle
+              center={[position.lat, position.lng]}
+              radius={radiusKm * 1000}
+              pathOptions={{ color: '#fbbf24', weight: 1.5, fillOpacity: 0.025, dashArray: '7 6' }}
+            >
+              <Tooltip sticky>{radiusKm} km live-analysis radius</Tooltip>
+            </Circle>
+          )}
+          {visibleLayers.catchment && analysis?.catchment_polygon?.length >= 3 && (
             <Polygon positions={polygonPositions(analysis.catchment_polygon)} pathOptions={{ color: '#38bdf8', weight: 2, fillOpacity: 0.14 }}>
               <Tooltip sticky>Computed screening catchment</Tooltip>
             </Polygon>
           )}
-          {contourAnalysis?.study_area_boundary?.length >= 3 && (
+          {visibleLayers.study && contourAnalysis?.study_area_boundary?.length >= 3 && (
             <Polygon positions={polygonPositions(contourAnalysis.study_area_boundary)} pathOptions={{ color: '#fbbf24', weight: 2, fillOpacity: 0.04, dashArray: '7 5' }}>
-              <Tooltip sticky>Uploaded contour study boundary</Tooltip>
+              <Tooltip sticky>{contourAnalysis.study_boundary_source === 'derived_extent' ? 'Derived contour-file extent' : 'Uploaded analysis extent (not verified suitable land)'}</Tooltip>
             </Polygon>
           )}
-          {contourAnalysis?.catchment?.boundary?.length >= 3 && (
+          {visibleLayers.catchment && contourAnalysis?.catchment?.boundary?.length >= 3 && (
             <Polygon positions={polygonPositions(contourAnalysis.catchment.boundary)} pathOptions={{ color: '#38bdf8', weight: 2, fillOpacity: 0.14 }}>
               <Tooltip sticky>Catchment derived from uploaded contours</Tooltip>
             </Polygon>
           )}
-          {analysis?.contours?.map((contour, index) => (
+          {visibleLayers.contours && analysis?.contours?.map((contour, index) => (
             <Polyline
               key={`${contour.elevation}:${index}`}
               positions={polygonPositions(contour.points)}
@@ -317,12 +369,37 @@ export default function App() {
               <Tooltip sticky>{contour.elevation} m</Tooltip>
             </Polyline>
           ))}
-          {analysis?.candidate_land_polygon?.length >= 3 && (
+          {visibleLayers.contours && contourAnalysis?.contours?.map((contour, index) => (
+            <Polyline
+              key={`uploaded:${contour.elevation}:${index}`}
+              positions={polygonPositions(contour.points)}
+              pathOptions={{
+                color: contourColor(
+                  contour.elevation,
+                  contourAnalysis.contour_summary.minimum_elevation_m,
+                  contourAnalysis.contour_summary.maximum_elevation_m,
+                ),
+                weight: 1.55,
+                opacity: 0.82,
+              }}
+            >
+              <Tooltip sticky>Reconstructed terrain contour · {contour.elevation} m</Tooltip>
+            </Polyline>
+          ))}
+          {visibleLayers.candidate && analysis?.candidate_land_polygon?.length >= 3 && (
             <Polygon positions={polygonPositions(analysis.candidate_land_polygon)} pathOptions={{ color: '#fbbf24', weight: 2, fillOpacity: 0.1, dashArray: '5 5' }}>
               <Tooltip sticky>Detected bare-surface candidate; ownership and suitability unverified</Tooltip>
             </Polygon>
           )}
-          {analysis?.pond && (
+          {visibleLayers.drainage && contourAnalysis?.drainage_path?.length >= 2 && (
+            <Polyline
+              positions={polygonPositions(contourAnalysis.drainage_path)}
+              pathOptions={{ color: '#ffb74d', weight: 3.2, opacity: 0.95, dashArray: '3 7' }}
+            >
+              <Tooltip sticky>Modelled D8 drainage path from the terrain candidate to the outlet</Tooltip>
+            </Polyline>
+          )}
+          {visibleLayers.points && analysis?.pond && (
             <Marker position={[analysis.pond.lat, analysis.pond.lng]} icon={PondIcon}>
               <Popup>
                 <strong>Screening candidate only</strong><br />
@@ -331,24 +408,60 @@ export default function App() {
               </Popup>
             </Marker>
           )}
-          {contourAnalysis?.pond_location && (
+          {visibleLayers.points && contourAnalysis?.outlet_location && (
+            <Marker position={[contourAnalysis.outlet_location.lat, contourAnalysis.outlet_location.lng]} icon={OutletIcon}>
+              <Popup>
+                <strong>Hydrologic outlet — not a pond recommendation</strong><br />
+                Elevation: {numberOrDash(contourAnalysis.outlet_location.elevation_m, 2)} m<br />
+                Contributing grid cells: {numberOrDash(contourAnalysis.outlet_location.contributing_cells, 0)}
+              </Popup>
+            </Marker>
+          )}
+          {visibleLayers.points && contourAnalysis?.pond_location && (
             <Marker position={[contourAnalysis.pond_location.lat, contourAnalysis.pond_location.lng]} icon={PondIcon}>
               <Popup>
-                <strong>Contour-derived candidate</strong><br />
+                <strong>Interior terrain-screening point</strong><br />
                 Elevation: {numberOrDash(contourAnalysis.pond_location.elevation_m, 2)} m<br />
+                Boundary distance: {numberOrDash(contourAnalysis.pond_location.boundary_distance_m, 0)} m<br />
                 Catchment: {numberOrDash(contourAnalysis.catchment.area_hectares, 2)} ha
               </Popup>
             </Marker>
           )}
         </MapContainer>
-        {(analysis || contourAnalysis) && <MapLegend mode={contourAnalysis ? 'contour' : 'location'} />}
+        {(analysis || contourAnalysis) && (
+          <MapLegend
+            mode={contourAnalysis ? 'contour' : 'location'}
+            layers={visibleLayers}
+            onToggle={toggleLayer}
+            studyBoundarySource={contourAnalysis?.study_boundary_source}
+            minimumElevation={contourAnalysis?.contour_summary?.minimum_elevation_m ?? analysis?.elevation_stats?.min_elevation}
+            maximumElevation={contourAnalysis?.contour_summary?.maximum_elevation_m ?? analysis?.elevation_stats?.max_elevation}
+          />
+        )}
         <div className="map-mode-chip" aria-hidden="true">
           <span className="live-dot" />
           {loading ? 'Model processing' : analysis || contourAnalysis ? 'Evidence layers active' : 'Map ready'}
         </div>
       </section>
 
-      <aside className="sidebar" aria-label="Pond screening controls and results">
+      <button
+        className="panel-toggle"
+        type="button"
+        aria-controls="analysis-panel"
+        aria-expanded={panelOpen}
+        onClick={() => setPanelOpen((open) => !open)}
+      >
+        <span aria-hidden="true">{panelOpen ? '›' : '‹'}</span>
+        {panelOpen ? 'Hide panel' : 'Show panel'}
+      </button>
+
+      <aside
+        id="analysis-panel"
+        className={`sidebar ${panelOpen ? '' : 'is-collapsed'}`}
+        aria-label="Pond screening controls and results"
+        aria-hidden={!panelOpen}
+        inert={!panelOpen}
+      >
         <header className="header">
           <div className="brand-row">
             <div className="brand-mark" aria-hidden="true">
@@ -505,10 +618,11 @@ export default function App() {
             </section>
 
             <section className="pond-recommendation result-card" aria-labelledby="contour-pond-heading">
-              <h2 id="contour-pond-heading">Contour-derived pond candidate</h2>
+              <h2 id="contour-pond-heading">Interior terrain-screening point</h2>
               <dl>
                 <div><dt>Point</dt><dd>{contourAnalysis.pond_location.lat.toFixed(6)}, {contourAnalysis.pond_location.lng.toFixed(6)}</dd></div>
                 <div><dt>Elevation</dt><dd>{numberOrDash(contourAnalysis.pond_location.elevation_m, 3)} m</dd></div>
+                <div><dt>Boundary setback</dt><dd>{numberOrDash(contourAnalysis.pond_location.boundary_distance_m, 0)} m</dd></div>
                 <div><dt>Selection</dt><dd>{contourAnalysis.pond_location.selection_method}</dd></div>
                 <div><dt>Interpolation</dt><dd>{contourAnalysis.grid.method}</dd></div>
               </dl>

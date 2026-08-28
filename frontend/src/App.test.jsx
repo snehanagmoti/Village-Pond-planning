@@ -23,6 +23,7 @@ vi.mock('leaflet/dist/images/marker-icon.png', () => ({ default: '' }));
 vi.mock('leaflet/dist/images/marker-shadow.png', () => ({ default: '' }));
 
 vi.mock('react-leaflet', () => ({
+  Circle: ({ children }) => <div>{children}</div>,
   MapContainer: ({ children }) => <div data-testid="map">{children}</div>,
   Marker: ({ children }) => <div>{children}</div>,
   Polygon: ({ children }) => <div>{children}</div>,
@@ -30,7 +31,7 @@ vi.mock('react-leaflet', () => ({
   Popup: ({ children }) => <div>{children}</div>,
   TileLayer: () => null,
   Tooltip: ({ children }) => <div>{children}</div>,
-  useMap: () => ({ flyTo: vi.fn() }),
+  useMap: () => ({ flyTo: vi.fn(), fitBounds: vi.fn(), invalidateSize: vi.fn() }),
   useMapEvents: vi.fn(),
 }));
 
@@ -81,7 +82,14 @@ it('uploads a KML contour map and renders its derived catchment result', async (
         lat: 21.2398,
         lng: 81.2864,
         elevation_m: 271.3,
-        selection_method: 'Maximum D8 contributing area',
+        boundary_distance_m: 90,
+        selection_method: 'Highest interior D8 contributing area',
+      },
+      outlet_location: {
+        lat: 21.2390,
+        lng: 81.2864,
+        elevation_m: 270.9,
+        contributing_cells: 12103,
       },
       catchment: {
         area_sqm: 3921225,
@@ -98,6 +106,15 @@ it('uploads a KML contour map and renders its derived catchment result', async (
         { lat: 21.22, lng: 81.27 },
         { lat: 21.25, lng: 81.29 },
         { lat: 21.22, lng: 81.31 },
+      ],
+      study_boundary_source: 'uploaded_polygon',
+      candidate_boundary_setback_m: 75,
+      contours: [
+        { elevation: 271, points: [{ lat: 21.22, lng: 81.27 }, { lat: 21.23, lng: 81.28 }, { lat: 21.24, lng: 81.27 }] },
+      ],
+      drainage_path: [
+        { lat: 21.2398, lng: 81.2864 },
+        { lat: 21.2390, lng: 81.2864 },
       ],
       quality: {
         status: 'degraded',
@@ -123,9 +140,29 @@ it('uploads a KML contour map and renders its derived catchment result', async (
   expect(body).toBeInstanceOf(FormData);
   expect(body.get('contour_file')).toBe(file);
   expect(config.signal).toBeInstanceOf(AbortSignal);
-  expect(await screen.findByRole('heading', { name: 'Contour-derived pond candidate' })).toBeInTheDocument();
+  expect(await screen.findByRole('heading', { name: 'Interior terrain-screening point' })).toBeInTheDocument();
   expect(screen.getByText('392.1225 ha')).toBeInTheDocument();
   expect(screen.getByText('Interpolated surface; field verification required.')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /Reconstructed elevation contours/ })).toHaveAttribute('aria-pressed', 'true');
+});
+
+
+test('collapses and restores the analysis panel without removing the map', async () => {
+  const user = userEvent.setup();
+  render(<App />);
+
+  const toggle = screen.getByRole('button', { name: 'Hide panel' });
+  const panel = screen.getByRole('complementary', { name: 'Pond screening controls and results' });
+  expect(toggle).toHaveAttribute('aria-expanded', 'true');
+
+  await user.click(toggle);
+
+  expect(screen.getByTestId('map')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Show panel' })).toHaveAttribute('aria-expanded', 'false');
+  expect(panel).toHaveAttribute('aria-hidden', 'true');
+
+  await user.click(screen.getByRole('button', { name: 'Show panel' }));
+  expect(screen.getByRole('button', { name: 'Hide panel' })).toHaveAttribute('aria-expanded', 'true');
 });
 
 test('switches between the live analysis and contour upload workflows', async () => {
