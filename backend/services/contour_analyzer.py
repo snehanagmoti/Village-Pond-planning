@@ -15,13 +15,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 from xml.etree import ElementTree
 
 import cv2
 import numpy as np
 
 from config import get_settings
+from services.cv_analyzer import buffer_terrain_exclusion, geospatial_mask_to_terrain_grid
 from services.quality import AnalysisValidationError
 from services.terrain import run_terrain_analysis
 
@@ -259,6 +260,27 @@ def parse_contour_document(document: bytes, filename: str) -> tuple[ContourDatas
     )
 
 
+def contour_dataset_context(dataset: ContourDataset) -> tuple[float, float, float]:
+    """Return centre latitude, centre longitude, and a square coverage radius."""
+    points = [point for line in dataset.lines for point in line.points]
+    if dataset.boundary:
+        points.extend(dataset.boundary)
+    longitudes = [point[0] for point in points]
+    latitudes = [point[1] for point in points]
+    lat_min, lat_max = min(latitudes), max(latitudes)
+    lng_min, lng_max = min(longitudes), max(longitudes)
+    center_lat = (lat_min + lat_max) / 2.0
+    center_lng = (lng_min + lng_max) / 2.0
+    height_km = (lat_max - lat_min) * 111.32
+    width_km = (
+        (lng_max - lng_min)
+        * 111.32
+        * math.cos(math.radians(center_lat))
+    )
+    radius_km = max(0.5, max(height_km, width_km) * 0.525)
+    return center_lat, center_lng, radius_km
+
+
 def _grid_geometry(dataset: ContourDataset) -> tuple[np.ndarray, np.ndarray, float, float]:
     longitudes = [point[0] for line in dataset.lines for point in line.points]
     latitudes = [point[1] for line in dataset.lines for point in line.points]
@@ -396,8 +418,18 @@ def _contour_interval(levels: list[float]) -> float | None:
     return round(float(statistics.median(differences)), 3) if differences else None
 
 
-def analyze_contour_file(document: bytes, filename: str) -> dict:
-    """Return structured catchment information derived only from the upload."""
+def analyze_contour_file(
+    document: bytes,
+    filename: str,
+    *,
+    selection_mode: str = "automatic",
+    selected_point: Optional[dict[str, float]] = None,
+    selected_region: Optional[list[dict[str, float]]] = None,
+    water_mask: Optional[np.ndarray] = None,
+    water_bounds: Optional[tuple[float, float, float, float]] = None,
+    water_exclusion_buffer_m: float = 60.0,
+) -> dict:
+    """Reconstruct terrain, rank sites, and delineate the selected catchment."""
     dataset, input_format = parse_contour_document(document, filename)
     dem, latitudes, longitudes, analysis_mask, grid = interpolate_contour_dem(dataset)
     study_boundary_source = "uploaded_polygon" if dataset.boundary else "derived_extent"
@@ -413,6 +445,22 @@ def analyze_contour_file(document: bytes, filename: str) -> dict:
             {"lat": float(latitudes[-1]), "lng": float(longitudes[-1])},
             {"lat": float(latitudes[-1]), "lng": float(longitudes[0])},
         ]
+    water_exclusion = None
+    detected_water_ratio = None
+    if water_mask is not None and water_bounds is not None:
+        water_exclusion = geospatial_mask_to_terrain_grid(
+            water_mask,
+            water_bounds,
+            latitudes,
+            longitudes,
+        )
+        detected_water_ratio = float(np.mean(water_exclusion[analysis_mask]))
+        water_exclusion = buffer_terrain_exclusion(
+            water_exclusion,
+            max(0.0, water_exclusion_buffer_m),
+            grid["cell_size_m"],
+        )
+
     try:
         terrain = run_terrain_analysis(
             dem,
@@ -420,6 +468,12 @@ def analyze_contour_file(document: bytes, filename: str) -> dict:
             longitudes,
             site_polygon,
             analysis_mask=analysis_mask,
+            candidate_exclusion_mask=water_exclusion,
+            candidate_boundary_setback_m=settings.contour_candidate_boundary_setback_m,
+            selection_mode=selection_mode,
+            selected_point=selected_point,
+            selected_region=selected_region,
+            candidate_limit=settings.contour_candidate_option_count,
         )
     except AnalysisValidationError as exc:
         raise ContourFileError(str(exc)) from exc
@@ -430,9 +484,17 @@ def analyze_contour_file(document: bytes, filename: str) -> dict:
     warnings = [
         "The elevation grid is interpolated from uploaded contour lines; verify the result against the original survey or DEM.",
         "The uploaded polygon is used as an analysis extent, not as proof that every enclosed cell is buildable or suitable for a pond.",
-        "The interior pond point is selected from terrain drainage concentration only; rivers, permanent water, ownership, soils, structures and excavation suitability are not verified by a contour-only upload.",
+        "Candidate scores combine upstream contributing area, local slope, relative elevation, boundary clearance and available detected-water clearance; they are comparative screening scores, not construction approvals.",
         "The catchment is limited to the uploaded contour coverage and may omit drainage from outside the map boundary.",
     ]
+    if water_exclusion is None:
+        warnings.append(
+            "Satellite water screening was unavailable. Rivers and permanent water could not be excluded automatically; do not approve a pond site until hydrography and field conditions are checked."
+        )
+    else:
+        warnings.append(
+            "Pixels classified as water and a surrounding safety buffer were excluded from every candidate. Satellite colour screening can miss muddy, narrow, shaded, seasonal or cloud-covered rivers, so field and hydrography checks remain mandatory."
+        )
     if not dataset.boundary:
         warnings.append("No study-area polygon was supplied, so the contour bounding rectangle was used.")
     if dataset.polygon_count > 1:
@@ -469,12 +531,41 @@ def analyze_contour_file(document: bytes, filename: str) -> dict:
             "lng": round(float(pond["lng"]), 6),
             "elevation_m": round(float(pond["elevation"]), 3),
             "boundary_distance_m": round(float(pond["boundary_distance_m"]), 2),
+            "local_slope_percent": round(float(pond["local_slope_percent"]), 3),
+            "suitability_score": round(float(pond["suitability_score"]), 2),
+            "contributing_area_sqm": round(float(pond["contributing_area_sqm"]), 2),
+            "water_distance_m": (
+                round(float(pond["water_distance_m"]), 2)
+                if pond["water_distance_m"] is not None else None
+            ),
             "selection_method": (
-                "Highest D8 contributing area after excluding the hydrologic outlet and "
-                f"the first {terrain['candidate_boundary_setback_m']:.0f} m inside the analysis boundary; "
-                "lower elevation is the tie-breaker"
+                "User-selected point snapped to the terrain grid and accepted only after boundary, outlet and detected-water checks"
+                if terrain["selection"]["mode"] == "point"
+                else "Highest multi-criteria terrain score inside the user-drawn search region"
+                if terrain["selection"]["mode"] == "region"
+                else "Highest spatially separated multi-criteria terrain score after boundary, outlet and detected-water checks"
             ),
         },
+        "candidate_options": [
+            {
+                "rank": option["rank"],
+                "lat": round(float(option["lat"]), 6),
+                "lng": round(float(option["lng"]), 6),
+                "elevation_m": round(float(option["elevation"]), 3),
+                "boundary_distance_m": round(float(option["boundary_distance_m"]), 2),
+                "local_slope_percent": round(float(option["local_slope_percent"]), 3),
+                "suitability_score": round(float(option["suitability_score"]), 2),
+                "contributing_area_hectares": round(float(option["contributing_area_sqm"]) / 10_000.0, 4),
+                "water_distance_m": (
+                    round(float(option["water_distance_m"]), 2)
+                    if option["water_distance_m"] is not None else None
+                ),
+                "selected": bool(option["selected"]),
+                "selection_reason": option["selection_reason"],
+            }
+            for option in terrain["candidate_options"]
+        ],
+        "selection": terrain["selection"],
         "outlet_location": {
             "lat": round(float(outlet["lat"]), 6),
             "lng": round(float(outlet["lng"]), 6),
@@ -487,6 +578,20 @@ def analyze_contour_file(document: bytes, filename: str) -> dict:
             "cell_count": int(terrain["catchment_cells"]),
             "study_grid_fraction": round(float(terrain["catchment_ratio"]), 5),
             "boundary": terrain["catchment_polygon"],
+        },
+        "eligible_candidate_area_sqm": round(float(terrain["candidate_area_sqm"]), 2),
+        "water_screening": {
+            "status": "applied" if water_exclusion is not None else "unavailable",
+            "method": "RGB/HSV satellite water classification with hard terrain-grid exclusion",
+            "detected_water_ratio": (
+                round(detected_water_ratio, 5) if detected_water_ratio is not None else None
+            ),
+            "exclusion_buffer_m": round(float(water_exclusion_buffer_m), 1),
+            "message": (
+                "Detected water was excluded before candidate scoring; non-detection is not proof that a river is absent."
+                if water_exclusion is not None
+                else "No valid satellite water mask was available; hydrography and field verification are required."
+            ),
         },
         "contours": terrain["contours"],
         "drainage_path": terrain["drainage_path"],
@@ -504,7 +609,14 @@ def analyze_contour_file(document: bytes, filename: str) -> dict:
                     "resolution": f"{_contour_interval(levels) or 'unknown'} m median contour interval",
                     "coverage_ratio": 1.0,
                     "message": "Terrain was reconstructed from contour geometry rather than a native raster DEM.",
-                }
+                },
+                "hydrology": {
+                    "name": "Priority-Flood, resolved-flat D8 flow and multi-criteria site ranking",
+                    "status": "degraded",
+                    "retrieved_at": datetime.now(timezone.utc).isoformat(),
+                    "resolution": f"{grid['cell_size_m']} m analysis cells",
+                    "message": "The selected catchment is delineated upstream of the reported pond point, not at the study-area outlet.",
+                },
             },
             "warnings": warnings,
         },

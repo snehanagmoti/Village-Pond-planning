@@ -1,15 +1,56 @@
+import json
 from io import BytesIO
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import httpx
+import numpy as np
 import pytest
 
 from main import app
+from routers import pond_planner
 from services.contour_analyzer import (
     ContourFileError,
     analyze_contour_file,
     parse_contour_document,
 )
+from services.cv_analyzer import SatelliteMosaic
+from services.quality import SourceInfo, UpstreamDataError
+from services.rainfall import RainfallResult
+
+
+@pytest.fixture(autouse=True)
+def contour_sources(monkeypatch):
+    async def rainfall(_lat, _lng):
+        return RainfallResult(
+            annual_avg_mm=900.0,
+            valid_years=30,
+            monthly=[
+                {"month": month, "rainfall_mm": 75.0, "valid_years": 30}
+                for month in ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+            ],
+            source=SourceInfo(name="test rainfall", status="reliable", period="1991-2020"),
+        )
+
+    async def imagery(lat, lng, radius):
+        image = np.zeros((96, 96, 3), dtype=np.uint8)
+        image[:, :48] = (55, 105, 155)
+        image[:, 48:] = (75, 135, 185)
+        offset = radius / 111.32
+        return SatelliteMosaic(
+            image=image,
+            bounds=(lat - offset, lat + offset, lng - offset, lng + offset),
+            zoom=14,
+            source=SourceInfo(name="test imagery", status="reliable", resolution="10 m"),
+        )
+
+    monkeypatch.setattr(pond_planner, "get_rainfall_data", rainfall)
+    monkeypatch.setattr(pond_planner, "download_satellite_mosaic", imagery)
+    monkeypatch.setattr(pond_planner.settings, "approved_runoff_coefficient", 0.3)
+    monkeypatch.setattr(
+        pond_planner.settings,
+        "approved_runoff_coefficient_source",
+        "Test coefficient",
+    )
 
 
 @pytest.fixture
@@ -83,6 +124,75 @@ def test_kml_analysis_derives_structured_catchment_without_hard_coded_site():
     assert len(result["contours"]) > 0
     assert len(result["drainage_path"]) >= 2
     assert result["quality"]["screening_only"] is True
+    assert len(result["candidate_options"]) >= 1
+    assert result["candidate_options"][0]["selected"] is True
+    assert result["pond_location"]["contributing_area_sqm"] == pytest.approx(
+        result["catchment"]["area_sqm"]
+    )
+
+
+def test_user_point_is_snapped_validated_and_used_as_the_catchment_pour_point():
+    automatic = analyze_contour_file(synthetic_kml(), "terrain.kml")
+    alternative = automatic["candidate_options"][-1]
+
+    selected = analyze_contour_file(
+        synthetic_kml(),
+        "terrain.kml",
+        selection_mode="point",
+        selected_point={"lat": alternative["lat"], "lng": alternative["lng"]},
+    )
+
+    assert selected["selection"]["mode"] == "point"
+    assert selected["candidate_options"][0]["selected"] is True
+    assert selected["pond_location"]["lat"] == pytest.approx(alternative["lat"])
+    assert selected["pond_location"]["contributing_area_sqm"] == pytest.approx(
+        selected["catchment"]["area_sqm"]
+    )
+
+
+def test_user_region_limits_the_ranked_candidate_options():
+    automatic = analyze_contour_file(synthetic_kml(), "terrain.kml")
+    point = automatic["candidate_options"][0]
+    delta = 0.0015
+    region = [
+        {"lat": point["lat"] - delta, "lng": point["lng"] - delta},
+        {"lat": point["lat"] - delta, "lng": point["lng"] + delta},
+        {"lat": point["lat"] + delta, "lng": point["lng"] + delta},
+        {"lat": point["lat"] + delta, "lng": point["lng"] - delta},
+    ]
+
+    selected = analyze_contour_file(
+        synthetic_kml(),
+        "terrain.kml",
+        selection_mode="region",
+        selected_region=region,
+    )
+
+    assert selected["selection"]["mode"] == "region"
+    assert all(
+        region[0]["lat"] <= option["lat"] <= region[2]["lat"]
+        and region[0]["lng"] <= option["lng"] <= region[1]["lng"]
+        for option in selected["candidate_options"]
+    )
+
+
+def test_detected_water_buffer_rejects_a_user_selected_river_cell():
+    automatic = analyze_contour_file(synthetic_kml(), "terrain.kml")
+    point = automatic["candidate_options"][0]
+    mask = np.zeros((101, 101), dtype=np.uint8)
+    col = round((point["lng"] - 73.0) / 0.01 * 100)
+    row = round((18.01 - point["lat"]) / 0.01 * 100)
+    mask[max(0, row - 2):row + 3, max(0, col - 2):col + 3] = 255
+
+    with pytest.raises(ContourFileError, match="detected-water exclusion buffer"):
+        analyze_contour_file(
+            synthetic_kml(),
+            "terrain.kml",
+            selection_mode="point",
+            selected_point={"lat": point["lat"], "lng": point["lng"]},
+            water_mask=mask,
+            water_bounds=(18.0, 18.01, 73.0, 73.01),
+        )
 
 
 def test_kmz_uses_doc_kml_and_reports_archive_format():
@@ -151,9 +261,74 @@ async def test_contour_upload_api_and_assignment_alias(client):
     payload = response.json()
     assert payload["contour_summary"]["contour_count"] == 5
     assert payload["analysis_status"] == "degraded"
+    assert payload["rainfall_data"]["annual_avg_mm"] == 900.0
+    assert payload["runoff_stats"]["estimated_volume_m3"] > 0
+    assert payload["pond"]["capacity_m3"] > 0
+    assert payload["water_screening"]["status"] == "applied"
 
     alias_response = await client.post("/api/analyzeContour", files=files)
     assert alias_response.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_contour_api_recomputes_for_manual_point_and_region(client):
+    automatic = await client.post(
+        "/api/analyze-contour",
+        files={"contour_file": ("terrain.kml", synthetic_kml())},
+    )
+    assert automatic.status_code == 200
+    alternative = automatic.json()["candidate_options"][-1]
+
+    point_response = await client.post(
+        "/api/analyze-contour",
+        data={
+            "selection_mode": "point",
+            "selected_lat": str(alternative["lat"]),
+            "selected_lng": str(alternative["lng"]),
+        },
+        files={"contour_file": ("terrain.kml", synthetic_kml())},
+    )
+    assert point_response.status_code == 200
+    point_payload = point_response.json()
+    assert point_payload["selection"]["mode"] == "point"
+    assert point_payload["pond_location"]["lat"] == pytest.approx(alternative["lat"])
+    assert point_payload["catchment"]["area_sqm"] == pytest.approx(
+        point_payload["pond_location"]["contributing_area_sqm"], abs=0.01
+    )
+
+    delta = 0.0015
+    region = [
+        {"lat": alternative["lat"] - delta, "lng": alternative["lng"] - delta},
+        {"lat": alternative["lat"] - delta, "lng": alternative["lng"] + delta},
+        {"lat": alternative["lat"] + delta, "lng": alternative["lng"] + delta},
+        {"lat": alternative["lat"] + delta, "lng": alternative["lng"] - delta},
+    ]
+    region_response = await client.post(
+        "/api/analyze-contour",
+        data={"selection_mode": "region", "selected_region": json.dumps(region)},
+        files={"contour_file": ("terrain.kml", synthetic_kml())},
+    )
+    assert region_response.status_code == 200
+    assert region_response.json()["selection"]["mode"] == "region"
+
+
+@pytest.mark.anyio
+async def test_contour_api_marks_missing_rainfall_outputs_incomplete(monkeypatch, client):
+    async def unavailable(_lat, _lng):
+        raise UpstreamDataError("rainfall", "Rainfall source unavailable in test")
+
+    monkeypatch.setattr(pond_planner, "get_rainfall_data", unavailable)
+    response = await client.post(
+        "/api/analyze-contour",
+        files={"contour_file": ("terrain.kml", synthetic_kml())},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["analysis_status"] == "incomplete"
+    assert payload["rainfall_data"]["annual_avg_mm"] is None
+    assert payload["runoff_stats"]["estimated_volume_m3"] is None
+    assert payload["pond"] is None
 
 
 @pytest.mark.anyio

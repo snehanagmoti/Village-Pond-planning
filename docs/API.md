@@ -15,8 +15,20 @@ screening outputs, not construction designs or land-ownership determinations.
 ### `POST /api/analyze-contour`
 
 Uploads a KML or KMZ contour map, reconstructs a gridded elevation surface,
-delineates the D8 catchment draining to the strongest candidate point, and
-returns structured JSON. The multipart field name is `contour_file`.
+screens satellite water, ranks spatially separated pond alternatives, delineates
+the D8 catchment draining to the selected candidate, queries historical
+rainfall, and returns runoff plus preliminary pond geometry. The multipart field
+name is `contour_file`.
+
+Selection fields are optional multipart form values:
+
+- `selection_mode=automatic` ranks the full eligible study area (default);
+- `selection_mode=point` requires `selected_lat` and `selected_lng`; the point
+  is snapped to the terrain grid and rejected if it is outside the study area,
+  on an outlet, inside detected water, or inside the configured boundary setback;
+- `selection_mode=region` requires `selected_region`, a JSON array containing
+  3-100 `{ "lat": ..., "lng": ... }` vertices. Options are ranked only inside
+  that polygon.
 
 Compatibility aliases required by common assignment wording are also accepted:
 
@@ -30,6 +42,7 @@ PowerShell example:
 ```powershell
 curl.exe -X POST `
   -F "contour_file=@C:\path\to\contours_1m.kml" `
+  -F "selection_mode=automatic" `
   http://127.0.0.1:8000/api/analyze-contour
 ```
 
@@ -72,17 +85,62 @@ Successful response shape:
     "method": "Contour rasterization with fixed-observation harmonic interpolation"
   },
   "pond_location": {
-    "lat": 21.239822,
-    "lng": 81.286438,
-    "elevation_m": 271.323,
-    "selection_method": "Maximum D8 contributing area within the uploaded study boundary, with lower elevation as tie-breaker"
+    "lat": 21.244025,
+    "lng": 81.288,
+    "elevation_m": 270.0,
+    "boundary_distance_m": 467.99,
+    "local_slope_percent": 2.899,
+    "suitability_score": 95.09,
+    "contributing_area_sqm": 3529523.47,
+    "water_distance_m": 120.0,
+    "selection_method": "Highest spatially separated multi-criteria terrain score after boundary, outlet and detected-water checks"
+  },
+  "candidate_options": [
+    {
+      "rank": 1,
+      "lat": 21.244025,
+      "lng": 81.288,
+      "suitability_score": 95.09,
+      "contributing_area_hectares": 352.9523,
+      "local_slope_percent": 2.899,
+      "selected": true
+    }
+  ],
+  "selection": {
+    "mode": "automatic",
+    "requested_point": null,
+    "requested_region": [],
+    "snapped_distance_m": null
   },
   "catchment": {
-    "area_sqm": 3921224.77,
-    "area_hectares": 392.1225,
-    "cell_count": 12103,
-    "study_grid_fraction": 0.46386,
+    "area_sqm": 3529523.47,
+    "area_hectares": 352.9523,
+    "cell_count": 10893,
+    "study_grid_fraction": 0.4175,
     "boundary": [{ "lat": 21.23, "lng": 81.28 }]
+  },
+  "rainfall_data": {
+    "annual_avg_mm": 1324.16,
+    "valid_years": 35,
+    "monthly": []
+  },
+  "runoff_stats": {
+    "catchment_area_sqm": 3529523.47,
+    "annual_rainfall_mm": 1324.16,
+    "runoff_coefficient": 0.3,
+    "estimated_volume_m3": 1402022.21
+  },
+  "pond": {
+    "lat": 21.244025,
+    "lng": 81.288,
+    "water_depth_m": 4.0,
+    "capacity_m3": 1121617.77
+  },
+  "water_screening": {
+    "status": "applied",
+    "detected_water_ratio": 0.015,
+    "exclusion_buffer_m": 60.0,
+    "message": "Detected water was excluded before candidate scoring; non-detection is not proof that a river is absent."
   },
   "study_area_boundary": [{ "lat": 21.22, "lng": 81.27 }],
   "quality": {
@@ -94,15 +152,17 @@ Successful response shape:
 }
 ```
 
-The example is abbreviated; boundary arrays contain at least three points and
-source metadata is included in the real response. Contour results are always
+The example is abbreviated; pond geometry, candidate metrics, monthly rainfall,
+boundary arrays and source metadata contain more fields in the real response.
+Contour results are always
 `degraded` by design because interpolation is not equivalent to a surveyed DEM.
 
 Errors:
 
 - `413 contour_file_too_large` - configured upload limit exceeded.
 - `422 invalid_contour_file` - unsupported, unsafe, malformed, or insufficient
-  contour content.
+  contour content, or a selected point/region that fails terrain safeguards.
+- `422 invalid_contour_selection` - malformed selection mode, point, or region.
 - `429 rate_limit_exceeded` - per-client contour request budget exceeded.
 - `500 contour_analysis_failed` - unexpected processing failure.
 

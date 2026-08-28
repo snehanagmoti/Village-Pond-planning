@@ -147,6 +147,15 @@ class Settings:
         self.contour_interpolation_iterations = _int(
             "CONTOUR_INTERPOLATION_ITERATIONS", 800, 50
         )
+        self.contour_candidate_boundary_setback_m = _float(
+            "CONTOUR_CANDIDATE_BOUNDARY_SETBACK_M", 75.0, 0.0
+        )
+        self.contour_detected_water_setback_m = _float(
+            "CONTOUR_DETECTED_WATER_SETBACK_M", 60.0, 0.0
+        )
+        self.contour_candidate_option_count = min(
+            5, _int("CONTOUR_CANDIDATE_OPTION_COUNT", 3, 1)
+        )
 
         self.capture_efficiency = min(1.0, _float("CAPTURE_EFFICIENCY", 0.80, 0.0))
         self.pond_min_water_depth_m = _float("POND_MIN_WATER_DEPTH_M", 2.0, 0.5)

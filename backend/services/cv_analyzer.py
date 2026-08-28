@@ -238,6 +238,51 @@ def raster_mask_to_terrain_grid(mask: np.ndarray, grid_shape: Tuple[int, int]) -
     return np.flipud(resized > 0).copy()
 
 
+def geospatial_mask_to_terrain_grid(
+    mask: np.ndarray,
+    bounds: Tuple[float, float, float, float],
+    latitudes: np.ndarray,
+    longitudes: np.ndarray,
+) -> np.ndarray:
+    """Sample a north-up geospatial raster onto south-to-north terrain axes."""
+    if mask is None or mask.ndim != 2 or len(latitudes) < 3 or len(longitudes) < 3:
+        raise ValueError("A two-dimensional mask and valid terrain axes are required")
+    lat_min, lat_max, lng_min, lng_max = bounds
+    if lat_max <= lat_min or lng_max <= lng_min:
+        raise ValueError("Imagery bounds are invalid")
+    rows, cols = mask.shape
+    sampled = np.zeros((len(latitudes), len(longitudes)), dtype=bool)
+    x_indices = np.rint(
+        (np.asarray(longitudes) - lng_min) / (lng_max - lng_min) * (cols - 1)
+    ).astype(int)
+    y_indices = np.rint(
+        (lat_max - np.asarray(latitudes)) / (lat_max - lat_min) * (rows - 1)
+    ).astype(int)
+    valid_x = (x_indices >= 0) & (x_indices < cols)
+    valid_y = (y_indices >= 0) & (y_indices < rows)
+    for terrain_row, (source_row, row_valid) in enumerate(zip(y_indices, valid_y, strict=False)):
+        if row_valid:
+            sampled[terrain_row, valid_x] = mask[source_row, x_indices[valid_x]] > 0
+    return sampled
+
+
+def buffer_terrain_exclusion(
+    mask: np.ndarray,
+    buffer_m: float,
+    cell_size_m: float,
+) -> np.ndarray:
+    """Dilate a boolean terrain-grid exclusion by a configurable metric buffer."""
+    source = np.asarray(mask, dtype=bool)
+    if source.ndim != 2 or cell_size_m <= 0 or buffer_m < 0:
+        raise ValueError("A two-dimensional mask and non-negative metric sizes are required")
+    buffer_cells = int(math.ceil(buffer_m / cell_size_m))
+    if buffer_cells == 0 or not np.any(source):
+        return source.copy()
+    kernel_size = buffer_cells * 2 + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    return cv2.dilate(source.astype(np.uint8), kernel).astype(bool)
+
+
 def contour_to_polygon(
     contour: np.ndarray,
     bounds: Tuple[float, float, float, float],

@@ -26,16 +26,27 @@ const DefaultIcon = L.icon({ iconUrl, shadowUrl: iconShadow, iconSize: [25, 41],
 L.Marker.prototype.options.icon = DefaultIcon;
 const PondIcon = L.divIcon({ html: '<span class="pond-marker" aria-hidden="true"></span>', className: '', iconSize: [22, 22], iconAnchor: [11, 11] });
 const OutletIcon = L.divIcon({ html: '<span class="outlet-marker" aria-hidden="true"></span>', className: '', iconSize: [20, 20], iconAnchor: [10, 10] });
+const candidateIcon = (rank, selected) => L.divIcon({
+  html: `<span class="candidate-rank${selected ? ' selected' : ''}" aria-hidden="true">${Number(rank)}</span>`,
+  className: '',
+  iconSize: [28, 28],
+  iconAnchor: [14, 14],
+});
 const imageryTileUrl = import.meta.env.VITE_IMAGERY_TILE_URL
   || 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
 const imageryAttribution = import.meta.env.VITE_IMAGERY_ATTRIBUTION
   || 'Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community';
 
 
-function SelectionMarker({ position, onSelect }) {
+function MapSelection({ position, onLocationSelect, onContourSelect, contourSelectionMode }) {
   useMapEvents({
     click(event) {
-      onSelect({ lat: event.latlng.lat, lng: event.latlng.lng }, null);
+      const point = { lat: event.latlng.lat, lng: event.latlng.lng };
+      if (contourSelectionMode === 'point' || contourSelectionMode === 'region') {
+        onContourSelect(point);
+      } else {
+        onLocationSelect(point, null);
+      }
     },
   });
   return position ? (
@@ -97,11 +108,16 @@ const hasAnalysisContract = (value) => Boolean(
 );
 const hasContourContract = (value) => Boolean(
   value
-  && value.analysis_status === 'degraded'
+  && ['degraded', 'incomplete'].includes(value.analysis_status)
   && value.contour_summary
   && value.grid
   && value.pond_location
+  && Array.isArray(value.candidate_options)
+  && value.selection
   && value.catchment
+  && value.rainfall_data
+  && value.runoff_stats
+  && value.water_screening
   && Array.isArray(value.catchment.boundary)
   && Array.isArray(value.study_area_boundary)
   && value.quality?.sources
@@ -119,6 +135,9 @@ export default function App() {
   const [analysis, setAnalysis] = useState(null);
   const [contourAnalysis, setContourAnalysis] = useState(null);
   const [contourFile, setContourFile] = useState(null);
+  const [contourSelectionMode, setContourSelectionMode] = useState('automatic');
+  const [contourPoint, setContourPoint] = useState(null);
+  const [contourRegion, setContourRegion] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [status, setStatus] = useState('Select a location, review the radius, then start the screening analysis.');
@@ -156,6 +175,18 @@ export default function App() {
 
   const handleVillageSelect = (result) => {
     selectLocation({ lat: result.lat, lng: result.lng }, result.display_name.split(',')[0]);
+  };
+
+  const handleContourMapClick = (point) => {
+    if (workflowMode !== 'contour' || !contourAnalysis || loading) return;
+    setError('');
+    if (contourSelectionMode === 'point') {
+      setContourPoint(point);
+      setStatus(`Point selected at ${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}. Press Evaluate selected point.`);
+    } else if (contourSelectionMode === 'region') {
+      setContourRegion((current) => current.length >= 100 ? current : [...current, point]);
+      setStatus('Region vertex added. Add at least three vertices, then evaluate the search region.');
+    }
   };
 
   const changeWorkflowMode = (mode) => {
@@ -229,13 +260,16 @@ export default function App() {
     setWorkflowMode('contour');
     setContourFile(file);
     setContourAnalysis(null);
+    setContourSelectionMode('automatic');
+    setContourPoint(null);
+    setContourRegion([]);
     setError('');
     setStatus(file
       ? `${file.name} selected. Press Analyze contour map to upload and compute the catchment.`
       : 'Select a KML or KMZ contour map to start the file-based analysis.');
   };
 
-  const runContourAnalysis = async (event) => {
+  const runContourAnalysis = async (event, selectionOverride = null) => {
     event?.preventDefault?.();
     if (!contourFile) {
       setError('Select a KML or KMZ contour file first.');
@@ -250,13 +284,33 @@ export default function App() {
     const controller = new AbortController();
     analysisAbortRef.current = controller;
     const sequence = ++analysisSequenceRef.current;
+    const requestedMode = selectionOverride?.mode || contourSelectionMode;
+    const requestedPoint = selectionOverride?.point || contourPoint;
+    const requestedRegion = selectionOverride?.region || contourRegion;
+    if (requestedMode === 'point' && !requestedPoint) {
+      setError('Choose Select point, then click an eligible place inside the mapped study boundary.');
+      return;
+    }
+    if (requestedMode === 'region' && requestedRegion.length < 3) {
+      setError('Draw a search region with at least three map vertices before evaluating it.');
+      return;
+    }
     const body = new FormData();
     body.append('contour_file', contourFile);
+    body.append('selection_mode', requestedMode);
+    if (requestedMode === 'point') {
+      body.append('selected_lat', String(requestedPoint.lat));
+      body.append('selected_lng', String(requestedPoint.lng));
+    }
+    if (requestedMode === 'region') {
+      body.append('selected_region', JSON.stringify(requestedRegion));
+    }
     setLoading(true);
     setError('');
     setAnalysis(null);
-    setContourAnalysis(null);
-    setStatus('Uploading contours and deriving the terrain, catchment and candidate pond point.');
+    setStatus(requestedMode === 'automatic'
+      ? 'Uploading contours, screening detected water and ranking candidate pond options.'
+      : 'Re-evaluating the contours for the selected map point or search region.');
     try {
       const response = await api.post('/analyze-contour', body, { signal: controller.signal });
       if (sequence !== analysisSequenceRef.current) return;
@@ -264,6 +318,9 @@ export default function App() {
         throw new Error('The API returned an unsupported contour-analysis contract.');
       }
       setContourAnalysis(response.data);
+      setContourSelectionMode(response.data.selection.mode);
+      setContourPoint(response.data.selection.requested_point || null);
+      setContourRegion(response.data.selection.requested_region || []);
       setPosition(null);
       setVillageName(null);
       setCoordinates({ lat: '', lng: '' });
@@ -296,6 +353,9 @@ export default function App() {
     setAnalysis(null);
     setContourAnalysis(null);
     setContourFile(null);
+    setContourSelectionMode('automatic');
+    setContourPoint(null);
+    setContourRegion([]);
     setError('');
     setFlyTarget(null);
     setStatus('Select a location, review the radius, then start the screening analysis.');
@@ -308,6 +368,23 @@ export default function App() {
 
   const toggleLayer = (layer) => {
     setVisibleLayers((current) => ({ ...current, [layer]: !current[layer] }));
+  };
+  const chooseContourSelectionMode = (mode) => {
+    if (loading) return;
+    setContourSelectionMode(mode);
+    setError('');
+    if (mode === 'automatic') {
+      setContourPoint(null);
+      setContourRegion([]);
+      setStatus('Automatic mode selected. Re-run to restore the highest-ranked terrain recommendation.');
+    } else if (mode === 'point') {
+      setContourRegion([]);
+      setStatus('Point mode active. Click a point inside the uploaded study boundary, then evaluate it.');
+    } else {
+      setContourPoint(null);
+      setContourRegion([]);
+      setStatus('Region mode active. Click at least three vertices around the area to search.');
+    }
   };
   const fitPoints = contourAnalysis?.study_area_boundary?.length >= 3
     ? polygonPositions(contourAnalysis.study_area_boundary)
@@ -330,7 +407,12 @@ export default function App() {
           />
           <FlyTo center={flyTarget} />
           <FitEvidence points={fitPoints} panelOpen={panelOpen} />
-          <SelectionMarker position={position} onSelect={selectLocation} />
+          <MapSelection
+            position={position}
+            onLocationSelect={selectLocation}
+            onContourSelect={handleContourMapClick}
+            contourSelectionMode={workflowMode === 'contour' && contourAnalysis ? contourSelectionMode : 'automatic'}
+          />
           {position && visibleLayers.study && (
             <Circle
               center={[position.lat, position.lng]}
@@ -399,6 +481,19 @@ export default function App() {
               <Tooltip sticky>Modelled D8 drainage path from the terrain candidate to the outlet</Tooltip>
             </Polyline>
           )}
+          {workflowMode === 'contour' && contourSelectionMode === 'region' && contourRegion.length >= 3 && (
+            <Polygon positions={polygonPositions(contourRegion)} pathOptions={{ color: '#c084fc', weight: 2.4, fillOpacity: 0.12, dashArray: '8 5' }}>
+              <Tooltip sticky>User-drawn candidate search region</Tooltip>
+            </Polygon>
+          )}
+          {workflowMode === 'contour' && contourSelectionMode === 'region' && contourRegion.length === 2 && (
+            <Polyline positions={polygonPositions(contourRegion)} pathOptions={{ color: '#c084fc', weight: 2.4, dashArray: '8 5' }} />
+          )}
+          {workflowMode === 'contour' && contourPoint && contourSelectionMode === 'point' && (
+            <Marker position={[contourPoint.lat, contourPoint.lng]}>
+              <Popup><strong>Requested point</strong><br />This point will be snapped to and validated against the terrain grid.</Popup>
+            </Marker>
+          )}
           {visibleLayers.points && analysis?.pond && (
             <Marker position={[analysis.pond.lat, analysis.pond.lng]} icon={PondIcon}>
               <Popup>
@@ -408,6 +503,16 @@ export default function App() {
               </Popup>
             </Marker>
           )}
+          {visibleLayers.points && analysis?.candidate_options?.filter((option) => !option.selected).map((option) => (
+            <Marker key={`live-option:${option.rank}:${option.lat}:${option.lng}`} position={[option.lat, option.lng]} icon={candidateIcon(option.rank, false)}>
+              <Popup>
+                <strong>Live-analysis alternative {option.rank}</strong><br />
+                Suitability: {numberOrDash(option.suitability_score, 1)} / 100<br />
+                Upstream area: {numberOrDash(option.contributing_area_hectares, 2)} ha<br />
+                Local slope: {numberOrDash(option.local_slope_percent, 1)}%
+              </Popup>
+            </Marker>
+          ))}
           {visibleLayers.points && contourAnalysis?.outlet_location && (
             <Marker position={[contourAnalysis.outlet_location.lat, contourAnalysis.outlet_location.lng]} icon={OutletIcon}>
               <Popup>
@@ -417,16 +522,17 @@ export default function App() {
               </Popup>
             </Marker>
           )}
-          {visibleLayers.points && contourAnalysis?.pond_location && (
-            <Marker position={[contourAnalysis.pond_location.lat, contourAnalysis.pond_location.lng]} icon={PondIcon}>
+          {visibleLayers.points && contourAnalysis?.candidate_options?.map((option) => (
+            <Marker key={`candidate:${option.rank}:${option.lat}:${option.lng}`} position={[option.lat, option.lng]} icon={candidateIcon(option.rank, option.selected)}>
               <Popup>
-                <strong>Interior terrain-screening point</strong><br />
-                Elevation: {numberOrDash(contourAnalysis.pond_location.elevation_m, 2)} m<br />
-                Boundary distance: {numberOrDash(contourAnalysis.pond_location.boundary_distance_m, 0)} m<br />
-                Catchment: {numberOrDash(contourAnalysis.catchment.area_hectares, 2)} ha
+                <strong>{option.selected ? 'Selected pond candidate' : `Candidate option ${option.rank}`}</strong><br />
+                Suitability: {numberOrDash(option.suitability_score, 1)} / 100<br />
+                Contributing area: {numberOrDash(option.contributing_area_hectares, 2)} ha<br />
+                Local slope: {numberOrDash(option.local_slope_percent, 1)}%<br />
+                Water clearance: {option.water_distance_m == null ? 'Not available' : `${numberOrDash(option.water_distance_m, 0)} m`}
               </Popup>
             </Marker>
-          )}
+          ))}
         </MapContainer>
         {(analysis || contourAnalysis) && (
           <MapLegend
@@ -592,6 +698,42 @@ export default function App() {
               <p>Screening-only result. The terrain surface is interpolated from the uploaded contour geometry.</p>
             </section>
 
+            <section className="result-card contour-selection-tools" aria-labelledby="contour-selection-heading">
+              <p className="eyebrow">Interactive siting</p>
+              <h2 id="contour-selection-heading">Choose how the pond point is selected</h2>
+              <p>The server always re-checks the study boundary, outlet, contributing flow and detected-water buffer. A map click never bypasses those safeguards.</p>
+              <div className="selection-mode-grid" role="group" aria-label="Contour candidate selection mode">
+                <button type="button" aria-pressed={contourSelectionMode === 'automatic'} onClick={() => chooseContourSelectionMode('automatic')}>
+                  <strong>Automatic</strong><span>Best ranked option</span>
+                </button>
+                <button type="button" aria-pressed={contourSelectionMode === 'point'} onClick={() => chooseContourSelectionMode('point')}>
+                  <strong>Select point</strong><span>Click one place</span>
+                </button>
+                <button type="button" aria-pressed={contourSelectionMode === 'region'} onClick={() => chooseContourSelectionMode('region')}>
+                  <strong>Draw region</strong><span>Search inside polygon</span>
+                </button>
+              </div>
+              {contourSelectionMode === 'point' && (
+                <div className="selection-action">
+                  <p>{contourPoint ? `Requested point: ${contourPoint.lat.toFixed(6)}, ${contourPoint.lng.toFixed(6)}` : 'Click the map to place the requested point.'}</p>
+                  <button className="btn" type="button" disabled={!contourPoint || loading} onClick={() => runContourAnalysis(null, { mode: 'point', point: contourPoint })}>Evaluate selected point</button>
+                </div>
+              )}
+              {contourSelectionMode === 'region' && (
+                <div className="selection-action">
+                  <p>{contourRegion.length} vertices placed. Use at least 3; the final vertex connects back to the first.</p>
+                  <div className="compact-actions">
+                    <button className="btn btn-secondary" type="button" disabled={!contourRegion.length || loading} onClick={() => setContourRegion((current) => current.slice(0, -1))}>Undo vertex</button>
+                    <button className="btn btn-secondary" type="button" disabled={!contourRegion.length || loading} onClick={() => setContourRegion([])}>Clear</button>
+                    <button className="btn" type="button" disabled={contourRegion.length < 3 || loading} onClick={() => runContourAnalysis(null, { mode: 'region', region: contourRegion })}>Evaluate region</button>
+                  </div>
+                </div>
+              )}
+              {contourSelectionMode === 'automatic' && contourAnalysis.selection.mode !== 'automatic' && (
+                <button className="btn" type="button" disabled={loading} onClick={() => runContourAnalysis(null, { mode: 'automatic' })}>Restore automatic recommendation</button>
+              )}
+            </section>
+
             {contourAnalysis.quality.warnings.length > 0 && (
               <section className="warnings result-card" aria-labelledby="contour-warning-heading">
                 <h2 id="contour-warning-heading">Limitations and warnings</h2>
@@ -617,15 +759,98 @@ export default function App() {
               </dl>
             </section>
 
+            <section className="result-card" aria-labelledby="contour-water-heading">
+              <h2 id="contour-water-heading" className="section-label">River and water safeguard</h2>
+              <dl className="stats-grid">
+                <div><dt>Status</dt><dd>{contourAnalysis.water_screening.status}</dd></div>
+                <div><dt>Detected water</dt><dd>{contourAnalysis.water_screening.detected_water_ratio == null ? 'Unavailable' : `${(contourAnalysis.water_screening.detected_water_ratio * 100).toFixed(2)}%`}</dd></div>
+                <div><dt>Hard exclusion buffer</dt><dd>{numberOrDash(contourAnalysis.water_screening.exclusion_buffer_m, 0)} m</dd></div>
+                <div><dt>Method</dt><dd>{contourAnalysis.water_screening.method}</dd></div>
+              </dl>
+              <p className="card-note">{contourAnalysis.water_screening.message}</p>
+            </section>
+
+            <section className="result-card" aria-labelledby="contour-options-heading">
+              <h2 id="contour-options-heading" className="section-label">Pond location options</h2>
+              <p>Options are separated on the map and ranked from the same terrain evidence. Option 1 is not an engineering approval.</p>
+              <div className="candidate-option-list">
+                {contourAnalysis.candidate_options.map((option) => (
+                  <article key={`${option.rank}:${option.lat}:${option.lng}`} className={option.selected ? 'selected' : ''}>
+                    <div className="candidate-option-heading"><strong>Option {option.rank}</strong><span>{numberOrDash(option.suitability_score, 1)} / 100</span></div>
+                    <p>{option.lat.toFixed(6)}, {option.lng.toFixed(6)}</p>
+                    <dl>
+                      <div><dt>Upstream area</dt><dd>{numberOrDash(option.contributing_area_hectares, 2)} ha</dd></div>
+                      <div><dt>Local slope</dt><dd>{numberOrDash(option.local_slope_percent, 1)}%</dd></div>
+                      <div><dt>Boundary clearance</dt><dd>{numberOrDash(option.boundary_distance_m, 0)} m</dd></div>
+                      <div><dt>Water clearance</dt><dd>{option.water_distance_m == null ? 'Unavailable' : `${numberOrDash(option.water_distance_m, 0)} m`}</dd></div>
+                    </dl>
+                    {option.selected
+                      ? <span className="selected-option-label">Selected for this result</span>
+                      : <button className="text-btn" type="button" disabled={loading} onClick={() => runContourAnalysis(null, { mode: 'point', point: option })}>Use this option and recompute</button>}
+                  </article>
+                ))}
+              </div>
+            </section>
+
             <section className="pond-recommendation result-card" aria-labelledby="contour-pond-heading">
-              <h2 id="contour-pond-heading">Interior terrain-screening point</h2>
+              <h2 id="contour-pond-heading">Selected pond screening result</h2>
               <dl>
                 <div><dt>Point</dt><dd>{contourAnalysis.pond_location.lat.toFixed(6)}, {contourAnalysis.pond_location.lng.toFixed(6)}</dd></div>
                 <div><dt>Elevation</dt><dd>{numberOrDash(contourAnalysis.pond_location.elevation_m, 3)} m</dd></div>
                 <div><dt>Boundary setback</dt><dd>{numberOrDash(contourAnalysis.pond_location.boundary_distance_m, 0)} m</dd></div>
+                <div><dt>Local slope</dt><dd>{numberOrDash(contourAnalysis.pond_location.local_slope_percent, 2)}%</dd></div>
+                <div><dt>Suitability score</dt><dd>{numberOrDash(contourAnalysis.pond_location.suitability_score, 1)} / 100</dd></div>
                 <div><dt>Selection</dt><dd>{contourAnalysis.pond_location.selection_method}</dd></div>
                 <div><dt>Interpolation</dt><dd>{contourAnalysis.grid.method}</dd></div>
               </dl>
+            </section>
+
+            <section className="result-card" aria-labelledby="contour-hydrology-heading">
+              <h2 id="contour-hydrology-heading" className="section-label">Rainfall, catchment and runoff</h2>
+              <dl className="stats-grid">
+                <div><dt>Catchment area</dt><dd>{numberOrDash(contourAnalysis.catchment.area_hectares, 3)} ha</dd></div>
+                <div><dt>Annual rainfall</dt><dd>{numberOrDash(contourAnalysis.rainfall_data.annual_avg_mm, 1)} mm/year</dd></div>
+                <div><dt>Valid rainfall years</dt><dd>{numberOrDash(contourAnalysis.rainfall_data.valid_years, 0)}</dd></div>
+                <div><dt>Estimated runoff volume</dt><dd>{numberOrDash(contourAnalysis.runoff_stats.estimated_volume_m3, 0)} m³/year</dd></div>
+                <div><dt>Runoff coefficient</dt><dd>{numberOrDash(contourAnalysis.runoff_stats.runoff_coefficient, 3)}</dd></div>
+                <div><dt>Coefficient basis</dt><dd>{contourAnalysis.runoff_stats.runoff_coefficient_basis || 'Not configured'}</dd></div>
+              </dl>
+            </section>
+
+            <RainfallChart monthly={contourAnalysis.rainfall_data.monthly} />
+
+            <section className="pond-recommendation result-card" aria-labelledby="contour-geometry-heading">
+              <h2 id="contour-geometry-heading">Recommended preliminary pond geometry</h2>
+              {contourAnalysis.pond ? (
+                <dl>
+                  <div><dt>Water / excavation depth</dt><dd>{contourAnalysis.pond.water_depth_m} / {contourAnalysis.pond.excavation_depth_m} m</dd></div>
+                  <div><dt>Water dimensions</dt><dd>{contourAnalysis.pond.water_length_m} × {contourAnalysis.pond.water_width_m} m</dd></div>
+                  <div><dt>Crest dimensions</dt><dd>{contourAnalysis.pond.crest_length_m} × {contourAnalysis.pond.crest_width_m} m</dd></div>
+                  <div><dt>Bottom dimensions</dt><dd>{contourAnalysis.pond.bottom_length_m} × {contourAnalysis.pond.bottom_width_m} m</dd></div>
+                  <div><dt>Storage capacity</dt><dd>{numberOrDash(contourAnalysis.pond.capacity_m3, 0)} m³</dd></div>
+                  <div><dt>Excavation volume</dt><dd>{numberOrDash(contourAnalysis.pond.excavation_volume_m3, 0)} m³</dd></div>
+                  <div><dt>Excavation footprint</dt><dd>{numberOrDash(contourAnalysis.pond.excavation_footprint_area_sqm, 0)} m²</dd></div>
+                  <div><dt>Side slope</dt><dd>{contourAnalysis.pond.side_slope_h_to_v}H:1V</dd></div>
+                </dl>
+              ) : <p>Pond dimensions are unavailable because rainfall or an approved runoff coefficient is missing.</p>}
+            </section>
+
+            <section className="result-card" aria-labelledby="contour-sources-heading">
+              <h2 id="contour-sources-heading" className="section-label">Evidence sources</h2>
+              <div className="source-list">
+                {Object.entries(contourAnalysis.quality.sources).map(([key, source]) => (
+                  <details key={key}>
+                    <summary><span>{source.name}</span><span className={`status-chip ${source.status}`}>{source.status}</span></summary>
+                    <dl>
+                      {source.resolution && <><dt>Resolution</dt><dd>{source.resolution}</dd></>}
+                      {source.period && <><dt>Period</dt><dd>{source.period}</dd></>}
+                      {source.model && <><dt>Model</dt><dd>{source.model}</dd></>}
+                      <dt>Retrieved</dt><dd>{new Date(source.retrieved_at).toLocaleString()}</dd>
+                      {source.message && <><dt>Note</dt><dd>{source.message}</dd></>}
+                    </dl>
+                  </details>
+                ))}
+              </div>
             </section>
 
           </div>
@@ -694,6 +919,26 @@ export default function App() {
             </section>
 
             <RainfallChart monthly={analysis.rainfall_data.monthly} />
+
+            {analysis.candidate_options?.length > 0 && (
+              <section className="result-card" aria-labelledby="live-options-heading">
+                <h2 id="live-options-heading" className="section-label">Ranked pond location options</h2>
+                <div className="candidate-option-list">
+                  {analysis.candidate_options.map((option) => (
+                    <article key={`live:${option.rank}:${option.lat}:${option.lng}`} className={option.selected ? 'selected' : ''}>
+                      <div className="candidate-option-heading"><strong>Option {option.rank}</strong><span>{numberOrDash(option.suitability_score, 1)} / 100</span></div>
+                      <p>{option.lat.toFixed(6)}, {option.lng.toFixed(6)}</p>
+                      <dl>
+                        <div><dt>Upstream area</dt><dd>{numberOrDash(option.contributing_area_hectares, 2)} ha</dd></div>
+                        <div><dt>Local slope</dt><dd>{numberOrDash(option.local_slope_percent, 1)}%</dd></div>
+                        <div><dt>Water clearance</dt><dd>{option.water_distance_m == null ? 'Unavailable' : `${numberOrDash(option.water_distance_m, 0)} m`}</dd></div>
+                      </dl>
+                      {option.selected && <span className="selected-option-label">Used for this result</span>}
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
 
             <section className="pond-recommendation result-card" aria-labelledby="pond-heading">
               <h2 id="pond-heading">Pond screening result</h2>

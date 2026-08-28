@@ -38,7 +38,16 @@ quality limitations instead of inventing convincing fallback values.
 - rasterizes contour observations and performs fixed-observation harmonic
   interpolation without sample-specific coordinates or outputs;
 - conditions the surface, resolves flats, computes D8 flow direction and flow
-  accumulation, selects a candidate point, and reverse-delineates its catchment;
+  accumulation, ranks three separated multi-criteria candidate options, and
+  reverse-delineates the catchment upstream of the selected point;
+- lets the user keep the automatic recommendation, select and validate one map
+  point, or draw a polygon that restricts the candidate search;
+- hard-excludes satellite pixels classified as water plus a configurable metric
+  buffer, while clearly stating that satellite non-detection cannot prove a
+  narrow, muddy, shaded, seasonal, or cloud-covered river is absent;
+- queries complete-year historical rainfall for the contour study, calculates
+  coefficient-based annual runoff, and returns preliminary pond depth,
+  dimensions, storage capacity, and excavation geometry;
 - returns a typed JSON response containing contour summary, grid quality,
   candidate point, catchment area and boundary, provenance, and warnings;
 - exposes the canonical `POST /api/analyze-contour` route plus compatible
@@ -161,10 +170,15 @@ error behavior.
 
 The uploaded contours are observations, not a raster DEM. The service preserves
 observed contour cells, interpolates between them, masks the study area, and
-passes the resulting grid through the shared hydrology pipeline. The candidate
-is the cell with maximum contributing area inside the supported domain, with
-lower elevation used as a tie-breaker. Reverse D8 traversal determines the
-contributing cells and latitude-corrected grid spacing determines catchment area.
+passes the resulting grid through the shared hydrology pipeline. Priority-Flood
+conditioning and deterministic flat resolution precede D8 flow. Candidate
+ranking combines logarithmic contributing area (dominant weight), local
+flatness, relative elevation, analysis-boundary clearance, and detected-water
+clearance. Hard masks remove outlets, the boundary setback, and detected-water
+buffers before any score is evaluated. Non-maximum suppression keeps options at
+least 100 m or three cells apart. Reverse D8 traversal starts at the actually
+selected candidate, so the reported catchment is the area that drains to that
+pond point rather than the larger map-edge outlet watershed.
 
 The live workflow uses a priority-flood conditioned DEM, deterministic flat
 resolution, steepest-descent D8 routing, watershed extraction, and source-aware

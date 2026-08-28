@@ -122,6 +122,18 @@ class PondRecommendation(APIModel):
     constrained_by_available_area: bool
 
 
+class PondCandidateOption(Coordinates):
+    rank: int = Field(..., ge=1, le=5)
+    elevation_m: float
+    boundary_distance_m: float = Field(..., ge=0)
+    local_slope_percent: float = Field(..., ge=0)
+    suitability_score: float = Field(..., ge=0, le=100)
+    contributing_area_hectares: float = Field(..., gt=0)
+    water_distance_m: Optional[float] = Field(None, ge=0)
+    selected: bool
+    selection_reason: str
+
+
 class PersistenceStatus(APIModel):
     status: Literal["saved", "disabled", "failed"]
     record_id: Optional[int] = None
@@ -132,6 +144,7 @@ class AnalysisResponse(APIModel):
     analysis_status: Literal["complete", "degraded", "incomplete"]
     quality: AnalysisQuality
     pond: Optional[PondRecommendation] = None
+    candidate_options: List[PondCandidateOption] = Field(default_factory=list, max_length=5)
     runoff_stats: RunoffStats
     candidate_land_polygon: List[Coordinates] = Field(default_factory=list)
     catchment_polygon: List[Coordinates] = Field(default_factory=list)
@@ -164,6 +177,10 @@ class ContourGrid(APIModel):
 class ContourPondLocation(Coordinates):
     elevation_m: float
     boundary_distance_m: float = Field(..., ge=0)
+    local_slope_percent: float = Field(..., ge=0)
+    suitability_score: float = Field(..., ge=0, le=100)
+    contributing_area_sqm: float = Field(..., gt=0)
+    water_distance_m: Optional[float] = Field(None, ge=0)
     selection_method: str
 
 
@@ -180,15 +197,49 @@ class ContourCatchment(APIModel):
     boundary: List[Coordinates] = Field(..., min_length=3)
 
 
+class ContourCandidateOption(Coordinates):
+    rank: int = Field(..., ge=1, le=5)
+    elevation_m: float
+    boundary_distance_m: float = Field(..., ge=0)
+    local_slope_percent: float = Field(..., ge=0)
+    suitability_score: float = Field(..., ge=0, le=100)
+    contributing_area_hectares: float = Field(..., gt=0)
+    water_distance_m: Optional[float] = Field(None, ge=0)
+    selected: bool
+    selection_reason: str
+
+
+class ContourSelection(APIModel):
+    mode: Literal["automatic", "point", "region"]
+    requested_point: Optional[Coordinates] = None
+    requested_region: List[Coordinates] = Field(default_factory=list)
+    snapped_distance_m: Optional[float] = Field(None, ge=0)
+
+
+class WaterScreening(APIModel):
+    status: Literal["applied", "unavailable"]
+    method: str
+    detected_water_ratio: Optional[float] = Field(None, ge=0, le=1)
+    exclusion_buffer_m: float = Field(..., ge=0)
+    message: str
+
+
 class ContourAnalysisResponse(APIModel):
-    analysis_status: Literal["degraded"]
+    analysis_status: Literal["degraded", "incomplete"]
     input_file: str = Field(..., min_length=1, max_length=255)
     input_format: Literal["kml", "kmz"]
     contour_summary: ContourSummary
     grid: ContourGrid
     pond_location: ContourPondLocation
+    candidate_options: List[ContourCandidateOption] = Field(..., min_length=1, max_length=5)
+    selection: ContourSelection
     outlet_location: ContourOutletLocation
     catchment: ContourCatchment
+    rainfall_data: RainfallData
+    runoff_stats: RunoffStats
+    pond: Optional[PondRecommendation] = None
+    eligible_candidate_area_sqm: float = Field(..., gt=0)
+    water_screening: WaterScreening
     contours: List[ContourLine] = Field(default_factory=list)
     drainage_path: List[Coordinates] = Field(default_factory=list)
     study_area_boundary: List[Coordinates] = Field(..., min_length=3)

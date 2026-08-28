@@ -2,11 +2,12 @@
 
 import asyncio
 import hmac
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Annotated, List
 
-from fastapi import APIRouter, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Request, UploadFile
 
 from config import get_settings
 from models.database import fetch_history, save_analysis
@@ -28,10 +29,16 @@ from models.schemas import (
     SourceMetadata,
     VillageSearchResult,
 )
-from services.contour_analyzer import ContourFileError, analyze_contour_file
+from services.contour_analyzer import (
+    ContourFileError,
+    analyze_contour_file,
+    contour_dataset_context,
+    parse_contour_document,
+)
 from services.cv_analyzer import (
     LandCoverResult,
     analyze_satellite_image,
+    buffer_terrain_exclusion,
     contour_to_polygon,
     download_satellite_mosaic,
     raster_mask_to_terrain_grid,
@@ -87,6 +94,10 @@ async def analyze_contour_upload(
         UploadFile,
         File(description="Contour map in KML or KMZ format"),
     ],
+    selection_mode: Annotated[str, Form()] = "automatic",
+    selected_lat: Annotated[float | None, Form()] = None,
+    selected_lng: Annotated[float | None, Form()] = None,
+    selected_region: Annotated[str | None, Form()] = None,
 ) -> ContourAnalysisResponse:
     """Reconstruct terrain from uploaded contours and delineate a watershed.
 
@@ -110,14 +121,90 @@ async def analyze_contour_upload(
                 ),
             },
         )
+    mode = selection_mode.casefold().strip()
+    point = None
+    region = None
     try:
-        result = await asyncio.to_thread(analyze_contour_file, document, filename)
+        if mode not in {"automatic", "point", "region"}:
+            raise ValueError("Selection mode must be automatic, point, or region")
+        if mode == "point":
+            if selected_lat is None or selected_lng is None:
+                raise ValueError("Point selection requires selected_lat and selected_lng")
+            point_model = Coordinates(lat=selected_lat, lng=selected_lng)
+            point = point_model.model_dump()
+        if mode == "region":
+            decoded = json.loads(selected_region or "null")
+            if not isinstance(decoded, list) or not 3 <= len(decoded) <= 100:
+                raise ValueError("Region selection requires 3 to 100 coordinate vertices")
+            region = [Coordinates(**item).model_dump() for item in decoded]
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_contour_selection", "message": str(exc)},
+        ) from exc
+
+    try:
+        dataset, _ = await asyncio.to_thread(parse_contour_document, document, filename)
+        center_lat, center_lng, coverage_radius_km = contour_dataset_context(dataset)
     except ContourFileError as exc:
         raise HTTPException(
             status_code=422,
             detail={"code": "invalid_contour_file", "message": str(exc)},
         ) from exc
+
+    rainfall_task = asyncio.create_task(get_rainfall_data(center_lat, center_lng))
+    imagery_task = None
+    if coverage_radius_km <= settings.analysis_max_radius_km:
+        imagery_task = asyncio.create_task(
+            download_satellite_mosaic(center_lat, center_lng, coverage_radius_km)
+        )
+
+    imagery_result = None
+    land_result = None
+    imagery_error: Exception | None = None
+    if imagery_task is None:
+        imagery_error = UpstreamDataError(
+            "satellite_imagery",
+            "Contour coverage exceeds the configured satellite-screening radius",
+        )
+    else:
+        try:
+            imagery_result = await imagery_task
+            land_result = await asyncio.to_thread(
+                analyze_satellite_image, imagery_result.image
+            )
+        except Exception as exc:
+            imagery_error = exc
+
+    try:
+        result = await asyncio.to_thread(
+            analyze_contour_file,
+            document,
+            filename,
+            selection_mode=mode,
+            selected_point=point,
+            selected_region=region,
+            water_mask=land_result.water_mask if land_result else None,
+            water_bounds=imagery_result.bounds if imagery_result else None,
+            water_exclusion_buffer_m=settings.contour_detected_water_setback_m,
+        )
+    except ContourFileError as exc:
+        rainfall_task.cancel()
+        await asyncio.gather(rainfall_task, return_exceptions=True)
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": (
+                    "invalid_contour_selection"
+                    if mode in {"point", "region"}
+                    else "invalid_contour_file"
+                ),
+                "message": str(exc),
+            },
+        ) from exc
     except Exception as exc:
+        rainfall_task.cancel()
+        await asyncio.gather(rainfall_task, return_exceptions=True)
         logger.exception("contour_analysis_failed filename=%s", filename)
         raise HTTPException(
             status_code=500,
@@ -126,6 +213,119 @@ async def analyze_contour_upload(
                 "message": "Contour analysis failed unexpectedly",
             },
         ) from exc
+
+    warnings = result["quality"]["warnings"]
+    sources = result["quality"]["sources"]
+    if imagery_result is not None and land_result is not None:
+        sources["imagery"] = _source_model(imagery_result.source).model_dump(mode="json")
+        sources["water_screening"] = _source_model(SourceInfo(
+            name="RGB/HSV satellite water exclusion",
+            status="degraded",
+            resolution=imagery_result.source.resolution,
+            coverage_ratio=imagery_result.source.coverage_ratio,
+            message=land_result.message,
+        )).model_dump(mode="json")
+    else:
+        message = (
+            imagery_error.message
+            if isinstance(imagery_error, UpstreamDataError)
+            else "Satellite water screening failed"
+        )
+        sources["imagery"] = _unavailable_source(
+            settings.imagery_source_name, message
+        ).model_dump(mode="json")
+
+    rainfall_result = await asyncio.gather(rainfall_task, return_exceptions=True)
+    rainfall_value = rainfall_result[0]
+    if isinstance(rainfall_value, Exception):
+        message = (
+            rainfall_value.message
+            if isinstance(rainfall_value, UpstreamDataError)
+            else "Rainfall processing failed"
+        )
+        sources["rainfall"] = _unavailable_source(
+            "Historical rainfall", message
+        ).model_dump(mode="json")
+        warnings.append(message)
+        rainfall_data = RainfallData()
+    else:
+        sources["rainfall"] = _source_model(rainfall_value.source).model_dump(mode="json")
+        rainfall_data = RainfallData(
+            annual_avg_mm=rainfall_value.annual_avg_mm,
+            valid_years=rainfall_value.valid_years,
+            monthly=[MonthlyRainfall(**item) for item in rainfall_value.monthly],
+        )
+
+    coefficient = settings.approved_runoff_coefficient
+    coefficient_basis = settings.approved_runoff_coefficient_source
+    if coefficient is None:
+        sources["runoff_coefficient"] = _unavailable_source(
+            "Approved runoff coefficient",
+            "No field- or authority-approved runoff coefficient is configured",
+        ).model_dump(mode="json")
+        warnings.append(
+            "Runoff volume and pond sizing are unavailable until an approved runoff coefficient is configured."
+        )
+    else:
+        sources["runoff_coefficient"] = _source_model(SourceInfo(
+            name="Configured runoff coefficient",
+            status="reliable" if coefficient_basis else "degraded",
+            model=coefficient_basis,
+            message=f"Configured coefficient: {coefficient:g}",
+        )).model_dump(mode="json")
+
+    annual_rainfall = rainfall_data.annual_avg_mm
+    volume = None
+    peak_discharge = None
+    pond = None
+    if coefficient is not None and annual_rainfall is not None:
+        volume = calculate_runoff(result["catchment"]["area_sqm"], annual_rainfall, coefficient)
+        warnings.append(
+            "Annual runoff is a screening water-yield estimate; evaporation, infiltration, sediment reserve, routing and environmental releases are not modelled."
+        )
+        if settings.design_rainfall_intensity_mm_h is not None:
+            peak_discharge = calculate_peak_discharge(
+                result["catchment"]["area_sqm"],
+                settings.design_rainfall_intensity_mm_h,
+                coefficient,
+            )
+        else:
+            warnings.append(
+                "Peak discharge is unavailable because no approved design rainfall intensity is configured."
+            )
+        try:
+            geometry = recommend_pond_geometry(volume)
+            pond = PondRecommendation(
+                lat=result["pond_location"]["lat"],
+                lng=result["pond_location"]["lng"],
+                **geometry,
+            )
+            warnings.append(
+                "Contour-workflow pond dimensions are preliminary runoff-storage geometry; cadastral land, soil, groundwater, spillway routing and a site survey are not yet available."
+            )
+        except AnalysisValidationError as exc:
+            warnings.append(str(exc))
+
+    result["rainfall_data"] = rainfall_data.model_dump(mode="json")
+    result["runoff_stats"] = RunoffStats(
+        catchment_area_sqm=result["catchment"]["area_sqm"],
+        annual_rainfall_mm=annual_rainfall,
+        runoff_coefficient=coefficient,
+        runoff_coefficient_basis=coefficient_basis,
+        estimated_volume_m3=round(volume, 2) if volume is not None else None,
+        peak_discharge_m3_s=(
+            round(peak_discharge, 5) if peak_discharge is not None else None
+        ),
+        peak_method=(
+            "Rational Method with configured design rainfall intensity"
+            if peak_discharge is not None else None
+        ),
+    ).model_dump(mode="json")
+    result["pond"] = pond.model_dump(mode="json") if pond else None
+    result["quality"]["warnings"] = list(dict.fromkeys(warnings))
+    if pond is None or annual_rainfall is None or coefficient is None:
+        result["analysis_status"] = "incomplete"
+        result["quality"]["status"] = "incomplete"
     return ContourAnalysisResponse(**result)
 
 
@@ -201,6 +401,11 @@ async def analyze_location(payload: AnalysisRequest, http_request: Request) -> A
                 water_exclusion_grid = raster_mask_to_terrain_grid(
                     land_result.water_mask, elevation_result.dem.shape
                 )
+                water_exclusion_grid = buffer_terrain_exclusion(
+                    water_exclusion_grid,
+                    settings.contour_detected_water_setback_m,
+                    elevation_result.cell_size_m,
+                )
             land_source = SourceInfo(
                 name="RGB/HSV land-cover screening",
                 status="degraded",
@@ -247,7 +452,7 @@ async def analyze_location(payload: AnalysisRequest, http_request: Request) -> A
     warnings.extend(terrain["warnings"])
     terrain_status = "degraded" if terrain["warnings"] else "reliable"
     sources["hydrology"] = _source_model(SourceInfo(
-        name="Priority-flood + D8 watershed screening",
+        name="Priority-Flood, resolved-flat D8 catchment and multi-criteria site ranking",
         status=terrain_status,
         resolution=f"{elevation_result.cell_size_m:.1f} m analysis cells",
         message="; ".join(terrain["warnings"]) or None,
@@ -382,10 +587,27 @@ async def analyze_location(payload: AnalysisRequest, http_request: Request) -> A
         sources=sources,
         warnings=list(dict.fromkeys(warnings)),
     )
+    candidate_options = [
+        {
+            "rank": option["rank"],
+            "lat": option["lat"],
+            "lng": option["lng"],
+            "elevation_m": option["elevation"],
+            "boundary_distance_m": option["boundary_distance_m"],
+            "local_slope_percent": option["local_slope_percent"],
+            "suitability_score": option["suitability_score"],
+            "contributing_area_hectares": option["contributing_area_sqm"] / 10_000.0,
+            "water_distance_m": option["water_distance_m"],
+            "selected": option["selected"],
+            "selection_reason": option["selection_reason"],
+        }
+        for option in terrain.get("candidate_options", [])
+    ]
     return AnalysisResponse(
         analysis_status=analysis_status,
         quality=quality,
         pond=pond,
+        candidate_options=candidate_options,
         runoff_stats=runoff_stats,
         candidate_land_polygon=candidate_polygon,
         catchment_polygon=catchment_polygon,

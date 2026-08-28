@@ -83,8 +83,27 @@ it('uploads a KML contour map and renders its derived catchment result', async (
         lng: 81.2864,
         elevation_m: 271.3,
         boundary_distance_m: 90,
+        local_slope_percent: 2.1,
+        suitability_score: 87.5,
+        contributing_area_sqm: 3921225,
+        water_distance_m: 140,
         selection_method: 'Highest interior D8 contributing area',
       },
+      candidate_options: [
+        {
+          rank: 1, lat: 21.2398, lng: 81.2864, elevation_m: 271.3,
+          boundary_distance_m: 90, local_slope_percent: 2.1,
+          suitability_score: 87.5, contributing_area_hectares: 392.1225,
+          water_distance_m: 140, selected: true, selection_reason: 'Best terrain score',
+        },
+        {
+          rank: 2, lat: 21.2410, lng: 81.2880, elevation_m: 272.0,
+          boundary_distance_m: 120, local_slope_percent: 3.2,
+          suitability_score: 78.0, contributing_area_hectares: 250.0,
+          water_distance_m: 180, selected: false, selection_reason: 'Alternative',
+        },
+      ],
+      selection: { mode: 'automatic', requested_point: null, requested_region: [], snapped_distance_m: null },
       outlet_location: {
         lat: 21.2390,
         lng: 81.2864,
@@ -101,6 +120,21 @@ it('uploads a KML contour map and renders its derived catchment result', async (
           { lat: 21.24, lng: 81.29 },
           { lat: 21.22, lng: 81.30 },
         ],
+      },
+      rainfall_data: { annual_avg_mm: 900, valid_years: 30, monthly: [] },
+      runoff_stats: {
+        catchment_area_sqm: 3921225,
+        annual_rainfall_mm: 900,
+        runoff_coefficient: 0.3,
+        runoff_coefficient_basis: 'Course demo scenario',
+        estimated_volume_m3: 1058730.75,
+      },
+      pond: null,
+      eligible_candidate_area_sqm: 100000,
+      water_screening: {
+        status: 'applied', method: 'RGB/HSV satellite water classification',
+        detected_water_ratio: 0.04, exclusion_buffer_m: 60,
+        message: 'Detected water is excluded; field verification remains required.',
       },
       study_area_boundary: [
         { lat: 21.22, lng: 81.27 },
@@ -139,11 +173,22 @@ it('uploads a KML contour map and renders its derived catchment result', async (
   expect(path).toBe('/analyze-contour');
   expect(body).toBeInstanceOf(FormData);
   expect(body.get('contour_file')).toBe(file);
+  expect(body.get('selection_mode')).toBe('automatic');
   expect(config.signal).toBeInstanceOf(AbortSignal);
-  expect(await screen.findByRole('heading', { name: 'Interior terrain-screening point' })).toBeInTheDocument();
+  expect(await screen.findByRole('heading', { name: 'Selected pond screening result' })).toBeInTheDocument();
   expect(screen.getByText('392.1225 ha')).toBeInTheDocument();
+  expect(screen.getByText('Estimated runoff volume')).toBeInTheDocument();
+  expect(screen.getByText((content) => content.replaceAll(',', '').includes('1058731 m³/year'))).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Use this option and recompute' })).toBeInTheDocument();
   expect(screen.getByText('Interpolated surface; field verification required.')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: /Reconstructed elevation contours/ })).toHaveAttribute('aria-pressed', 'true');
+
+  await user.click(screen.getByRole('button', { name: 'Use this option and recompute' }));
+  await waitFor(() => expect(api.post).toHaveBeenCalledTimes(2));
+  const manualBody = api.post.mock.calls[1][1];
+  expect(manualBody.get('selection_mode')).toBe('point');
+  expect(manualBody.get('selected_lat')).toBe('21.241');
+  expect(manualBody.get('selected_lng')).toBe('81.288');
 });
 
 

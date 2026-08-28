@@ -47,6 +47,12 @@ services:
         value: "0.30"
       - key: APPROVED_RUNOFF_COEFFICIENT_SOURCE
         value: Course demo scenario C=0.30; replace with an approved site-specific value
+      - key: CONTOUR_CANDIDATE_BOUNDARY_SETBACK_M
+        value: "75"
+      - key: CONTOUR_DETECTED_WATER_SETBACK_M
+        value: "60"
+      - key: CONTOUR_CANDIDATE_OPTION_COUNT
+        value: "3"
 
   - type: web
     name: sneha-village-pond-planning-2026

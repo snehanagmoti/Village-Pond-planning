@@ -272,6 +272,88 @@ def _distance_from_mask_boundary(mask: np.ndarray, cell_size_m: float) -> np.nda
     return np.maximum(0.0, pixel_distance - 1.0) * cell_size_m
 
 
+def _normalized(values: np.ndarray, mask: np.ndarray, *, logarithmic: bool = False) -> np.ndarray:
+    """Return stable 0..1 values over ``mask`` without leaking invalid cells."""
+    source = np.log1p(np.maximum(values, 0)) if logarithmic else values.astype(np.float64)
+    output = np.zeros(source.shape, dtype=np.float64)
+    selected = source[mask]
+    if selected.size == 0:
+        return output
+    minimum = float(np.min(selected))
+    maximum = float(np.max(selected))
+    if maximum - minimum <= 1e-12:
+        output[mask] = 1.0
+    else:
+        output[mask] = (source[mask] - minimum) / (maximum - minimum)
+    return output
+
+
+def _distance_m_between_cells(
+    first: tuple[int, int],
+    second: tuple[int, int],
+    lat_cell_m: float,
+    lng_cell_m: float,
+) -> float:
+    return math.hypot(
+        (first[0] - second[0]) * lat_cell_m,
+        (first[1] - second[1]) * lng_cell_m,
+    )
+
+
+def _rank_candidate_cells(
+    candidate_mask: np.ndarray,
+    score: np.ndarray,
+    accumulation: np.ndarray,
+    dem: np.ndarray,
+    *,
+    limit: int,
+    minimum_separation_m: float,
+    lat_cell_m: float,
+    lng_cell_m: float,
+) -> list[tuple[int, int]]:
+    """Select deterministic, spatially separated high-scoring cells."""
+    rows, cols = np.where(candidate_mask)
+    ordered = sorted(
+        zip(rows.tolist(), cols.tolist(), strict=False),
+        key=lambda cell: (
+            -float(score[cell]),
+            -int(accumulation[cell]),
+            float(dem[cell]),
+            int(cell[0]),
+            int(cell[1]),
+        ),
+    )
+    winners: list[tuple[int, int]] = []
+    for cell in ordered:
+        if all(
+            _distance_m_between_cells(cell, winner, lat_cell_m, lng_cell_m)
+            >= minimum_separation_m
+            for winner in winners
+        ):
+            winners.append(cell)
+            if len(winners) >= limit:
+                break
+    if not winners and ordered:
+        winners.append(ordered[0])
+    return winners
+
+
+def _nearest_grid_cell(
+    point: Dict[str, float],
+    lat_array: np.ndarray,
+    lng_array: np.ndarray,
+) -> tuple[int, int, float]:
+    row = int(np.argmin(np.abs(lat_array - float(point["lat"]))))
+    col = int(np.argmin(np.abs(lng_array - float(point["lng"]))))
+    lat_delta_m = (float(point["lat"]) - float(lat_array[row])) * 111_320.0
+    lng_delta_m = (
+        (float(point["lng"]) - float(lng_array[col]))
+        * 111_320.0
+        * math.cos(math.radians(float(point["lat"])))
+    )
+    return row, col, math.hypot(lat_delta_m, lng_delta_m)
+
+
 def trace_downstream_path(
     flow_direction: np.ndarray,
     start_row: int,
@@ -427,6 +509,10 @@ def run_terrain_analysis(
     candidate_land_mask: Optional[np.ndarray] = None,
     candidate_exclusion_mask: Optional[np.ndarray] = None,
     candidate_boundary_setback_m: float = 75.0,
+    selection_mode: str = "automatic",
+    selected_point: Optional[Dict[str, float]] = None,
+    selected_region: Optional[List[Dict[str, float]]] = None,
+    candidate_limit: int = 3,
 ) -> Dict:
     if dem.ndim != 2 or dem.shape != (len(lat_array), len(lng_array)):
         raise AnalysisValidationError("DEM shape must match the latitude and longitude axes")
@@ -450,23 +536,12 @@ def run_terrain_analysis(
         flow_direction[~valid_mask | study_boundary] = -1
     accumulation = flow_accumulation(flow_direction)
 
-    outlet_mask = (flow_direction < 0) & valid_mask
-    pour_row, pour_col = find_pour_point(dem, accumulation, outlet_mask)
-    catchment_mask = delineate_catchment(flow_direction, pour_row, pour_col) & valid_mask
-    catchment_cells = int(np.sum(catchment_mask))
-    if catchment_cells < 3:
-        raise AnalysisValidationError("Computed watershed contains fewer than three cells")
-    catchment_ratio = catchment_cells / int(np.sum(valid_mask))
-    if catchment_ratio < 0.02:
-        raise AnalysisValidationError("Computed watershed is too small for a defensible recommendation")
-
     lat_cell_m = abs(float(lat_array[1] - lat_array[0])) * 111_320.0
     lng_cell_m = abs(float(lng_array[1] - lng_array[0])) * 111_320.0 * math.cos(math.radians(float(np.mean(lat_array))))
     cell_area_sqm = lat_cell_m * lng_cell_m
-    catchment_area_sqm = catchment_cells * cell_area_sqm
-    catchment_polygon = extract_catchment_boundary(catchment_mask, lat_array, lng_array)
-    if len(catchment_polygon) < 3:
-        raise AnalysisValidationError("Computed watershed boundary is invalid")
+
+    outlet_mask = (flow_direction < 0) & valid_mask
+    outlet_row, outlet_col = find_pour_point(dem, accumulation, outlet_mask)
 
     if candidate_land_mask is None:
         land_mask = polygon_to_mask(candidate_land_polygon or [], lat_array, lng_array)
@@ -480,7 +555,9 @@ def run_terrain_analysis(
         if exclusions.shape != dem.shape:
             raise AnalysisValidationError("Candidate exclusion mask must match the DEM")
 
-    raw_candidate_mask = catchment_mask & land_mask & ~exclusions
+    # A candidate must lie inside the supplied analysis/land evidence, outside
+    # detected water, away from the model boundary, and upstream of an outlet.
+    raw_candidate_mask = valid_mask & land_mask & ~exclusions
     boundary_distance_m = _distance_from_mask_boundary(valid_mask, math.sqrt(cell_area_sqm))
     candidate_mask = (
         raw_candidate_mask
@@ -489,22 +566,175 @@ def run_terrain_analysis(
     )
     candidate_cells = int(np.sum(candidate_mask))
     pond_location = None
+    candidate_options: List[Dict] = []
     drainage_path: List[Dict[str, float]] = []
+
+    gradient_lat, gradient_lng = np.gradient(dem, lat_cell_m, lng_cell_m)
+    slope_percent = np.hypot(gradient_lat, gradient_lng) * 100.0
+    flow_score = _normalized(accumulation.astype(np.float64), candidate_mask, logarithmic=True)
+    flatness_score = 1.0 - np.clip(slope_percent / 20.0, 0.0, 1.0)
+    low_elevation_score = 1.0 - _normalized(dem, candidate_mask)
+    boundary_score = np.clip(
+        boundary_distance_m / max(1.0, candidate_boundary_setback_m * 3.0),
+        0.0,
+        1.0,
+    )
+    water_distance_m: Optional[np.ndarray] = None
+    if np.any(exclusions):
+        water_distance_m = (
+            cv2.distanceTransform((~exclusions).astype(np.uint8), cv2.DIST_L2, 5)
+            * math.sqrt(cell_area_sqm)
+        )
+        water_score = np.clip(water_distance_m / 250.0, 0.0, 1.0)
+        suitability_score = (
+            0.52 * flow_score
+            + 0.20 * flatness_score
+            + 0.10 * low_elevation_score
+            + 0.08 * boundary_score
+            + 0.10 * water_score
+        )
+    else:
+        suitability_score = (
+            0.58 * flow_score
+            + 0.22 * flatness_score
+            + 0.11 * low_elevation_score
+            + 0.09 * boundary_score
+        )
+
+    mode = selection_mode.casefold().strip()
+    if mode not in {"automatic", "point", "region"}:
+        raise AnalysisValidationError("Selection mode must be automatic, point, or region")
+    selection_scope = candidate_mask.copy()
+    snapped_distance_m: Optional[float] = None
+    requested_point = None
+    requested_region = None
+    selected_cell: Optional[tuple[int, int]] = None
+
+    if mode == "point":
+        if not selected_point or not {"lat", "lng"}.issubset(selected_point):
+            raise AnalysisValidationError("Point selection requires latitude and longitude")
+        requested_point = {
+            "lat": float(selected_point["lat"]),
+            "lng": float(selected_point["lng"]),
+        }
+        row, col, snapped_distance_m = _nearest_grid_cell(requested_point, lat_array, lng_array)
+        maximum_snap_m = max(lat_cell_m, lng_cell_m) * 1.5
+        reasons: list[str] = []
+        if snapped_distance_m > maximum_snap_m or not valid_mask[row, col]:
+            reasons.append("outside the uploaded study area")
+        else:
+            if not land_mask[row, col]:
+                reasons.append("outside the candidate land evidence")
+            if exclusions[row, col]:
+                reasons.append("inside the detected-water exclusion buffer")
+            if flow_direction[row, col] < 0:
+                reasons.append("on a hydrologic outlet or terminal cell")
+            if boundary_distance_m[row, col] < max(0.0, candidate_boundary_setback_m):
+                reasons.append(
+                    f"within the {candidate_boundary_setback_m:.0f} m analysis-boundary setback"
+                )
+        if reasons:
+            raise AnalysisValidationError(
+                "Selected point is not eligible: " + "; ".join(reasons)
+            )
+        selected_cell = (row, col)
+    elif mode == "region":
+        if not selected_region or len(selected_region) < 3:
+            raise AnalysisValidationError("Region selection requires at least three map vertices")
+        requested_region = [
+            {"lat": float(point["lat"]), "lng": float(point["lng"])}
+            for point in selected_region
+        ]
+        region_mask = polygon_to_mask(requested_region, lat_array, lng_array) & valid_mask
+        if int(np.sum(region_mask)) < 1:
+            raise AnalysisValidationError("The selected region does not overlap the uploaded study area")
+        selection_scope &= region_mask
+        if not np.any(selection_scope):
+            raise AnalysisValidationError(
+                "The selected region contains no eligible terrain cell after boundary and water safeguards"
+            )
+
     if candidate_cells > 0:
-        # Prefer drainage concentration only after removing outlets, excluded
-        # surfaces and the configured analysis-edge setback.
-        candidate_accumulation = np.where(candidate_mask, accumulation, -1)
-        maximum = np.max(candidate_accumulation)
-        rows, cols = np.where(candidate_mask & (accumulation == maximum))
-        winner = int(np.argmin(dem[rows, cols]))
-        row, col = int(rows[winner]), int(cols[winner])
+        minimum_separation_m = max(100.0, 3.0 * math.sqrt(cell_area_sqm))
+        ranked_scope = selection_scope if mode != "point" else candidate_mask
+        ranked_cells = _rank_candidate_cells(
+            ranked_scope,
+            suitability_score,
+            accumulation,
+            dem,
+            limit=max(1, min(5, int(candidate_limit))),
+            minimum_separation_m=minimum_separation_m,
+            lat_cell_m=lat_cell_m,
+            lng_cell_m=lng_cell_m,
+        )
+        if mode == "point":
+            ranked_cells = [selected_cell] + [
+                cell for cell in ranked_cells
+                if cell != selected_cell
+                and _distance_m_between_cells(
+                    cell, selected_cell, lat_cell_m, lng_cell_m
+                ) >= minimum_separation_m
+            ]
+            ranked_cells = ranked_cells[: max(1, min(5, int(candidate_limit)))]
+        if selected_cell is None and ranked_cells:
+            selected_cell = ranked_cells[0]
+        if selected_cell is None:
+            raise AnalysisValidationError("No eligible terrain cell could be ranked")
+
+        row, col = selected_cell
         pond_location = {
             "lat": float(lat_array[row]),
             "lng": float(lng_array[col]),
             "elevation": float(dem[row, col]),
             "boundary_distance_m": float(boundary_distance_m[row, col]),
+            "local_slope_percent": float(slope_percent[row, col]),
+            "suitability_score": float(suitability_score[row, col] * 100.0),
+            "contributing_area_sqm": float(accumulation[row, col] * cell_area_sqm),
+            "water_distance_m": (
+                float(water_distance_m[row, col]) if water_distance_m is not None else None
+            ),
         }
         drainage_path = trace_downstream_path(flow_direction, row, col, lat_array, lng_array)
+
+        for rank, (option_row, option_col) in enumerate(ranked_cells, start=1):
+            candidate_options.append({
+                "rank": rank,
+                "lat": float(lat_array[option_row]),
+                "lng": float(lng_array[option_col]),
+                "elevation": float(dem[option_row, option_col]),
+                "boundary_distance_m": float(boundary_distance_m[option_row, option_col]),
+                "local_slope_percent": float(slope_percent[option_row, option_col]),
+                "suitability_score": float(suitability_score[option_row, option_col] * 100.0),
+                "contributing_area_sqm": float(accumulation[option_row, option_col] * cell_area_sqm),
+                "water_distance_m": (
+                    float(water_distance_m[option_row, option_col])
+                    if water_distance_m is not None else None
+                ),
+                "selected": (option_row, option_col) == selected_cell,
+                "selection_reason": (
+                    "User-selected point after terrain and water validation"
+                    if mode == "point" and (option_row, option_col) == selected_cell
+                    else "Highest multi-criteria terrain suitability in the selected region"
+                    if mode == "region" and (option_row, option_col) == selected_cell
+                    else "Highest multi-criteria terrain suitability in the eligible study area"
+                    if mode == "automatic" and (option_row, option_col) == selected_cell
+                    else "Spatially separated multi-criteria terrain alternative"
+                ),
+            })
+
+    # The reported catchment must contribute to the selected pond point. When
+    # no land candidate is available, retain the main outlet watershed so the
+    # analysis still reports hydrology without inventing a pond location.
+    catchment_row, catchment_col = selected_cell or (outlet_row, outlet_col)
+    catchment_mask = delineate_catchment(flow_direction, catchment_row, catchment_col) & valid_mask
+    catchment_cells = int(np.sum(catchment_mask))
+    if catchment_cells < 3:
+        raise AnalysisValidationError("Computed watershed contains fewer than three cells")
+    catchment_ratio = catchment_cells / int(np.sum(valid_mask))
+    catchment_area_sqm = catchment_cells * cell_area_sqm
+    catchment_polygon = extract_catchment_boundary(catchment_mask, lat_array, lng_array)
+    if len(catchment_polygon) < 3:
+        raise AnalysisValidationError("Computed watershed boundary is invalid")
 
     warnings = []
     filled_ratio = float(np.mean(fill_depth[valid_mask] > 1e-6))
@@ -515,10 +745,18 @@ def run_terrain_analysis(
         )
     if int(np.sum(raw_candidate_mask)) > 0 and candidate_cells == 0:
         warnings.append(
-            "Candidate land overlaps the watershed, but no cell remains after water/exclusion masks and the analysis-boundary setback."
+            "Candidate land exists in the study grid, but no cell remains after outlet, water/exclusion and analysis-boundary safeguards."
         )
     elif candidate_cells == 0:
-        warnings.append("No eligible candidate land overlaps the computed watershed; no pond location was produced.")
+        warnings.append("No eligible candidate land remains in the study grid; no pond location was produced.")
+    if pond_location is not None and pond_location["local_slope_percent"] > 15.0:
+        warnings.append(
+            f"The selected cell has a {pond_location['local_slope_percent']:.1f}% local grid slope; geotechnical and grading review is required."
+        )
+    if catchment_ratio < 0.02:
+        warnings.append(
+            "The selected point has a small contributing catchment (under 2% of the study grid); verify the point and contour coverage."
+        )
 
     return {
         "catchment_polygon": catchment_polygon,
@@ -528,11 +766,18 @@ def run_terrain_analysis(
         "catchment_ratio": catchment_ratio,
         "candidate_area_sqm": candidate_cells * cell_area_sqm,
         "pond_location": pond_location,
+        "candidate_options": candidate_options,
+        "selection": {
+            "mode": mode,
+            "requested_point": requested_point,
+            "requested_region": requested_region or [],
+            "snapped_distance_m": snapped_distance_m,
+        },
         "outlet_location": {
-            "lat": float(lat_array[pour_row]),
-            "lng": float(lng_array[pour_col]),
-            "elevation": float(dem[pour_row, pour_col]),
-            "contributing_cells": int(accumulation[pour_row, pour_col]),
+            "lat": float(lat_array[outlet_row]),
+            "lng": float(lng_array[outlet_col]),
+            "elevation": float(dem[outlet_row, outlet_col]),
+            "contributing_cells": int(accumulation[outlet_row, outlet_col]),
         },
         "drainage_path": drainage_path,
         "candidate_boundary_setback_m": max(0.0, float(candidate_boundary_setback_m)),

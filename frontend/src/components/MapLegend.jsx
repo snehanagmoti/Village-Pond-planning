@@ -54,7 +54,7 @@ export default function MapLegend({
           </LayerToggle>
         )}
         <LayerToggle layer="points" enabled={layers.points} onToggle={onToggle} swatchClass="legend-dot pond">
-          {mode === 'contour' ? 'Terrain point + outlet' : 'Selected centre + pond point'}
+          {mode === 'contour' ? 'Ranked pond options + outlet' : 'Selected centre + pond options'}
         </LayerToggle>
       </ul>
       {minimumElevation != null && maximumElevation != null && (
