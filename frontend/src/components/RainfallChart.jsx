@@ -7,11 +7,15 @@ export default function RainfallChart({ monthly }) {
   const chartHeight = 112;
   const chartWidth = left + monthly.length * (barWidth + gap);
   const totalHeight = chartHeight + 34;
+  const annualAverage = monthly.reduce((sum, item) => sum + item.rainfall_mm, 0);
   const summary = monthly.map((item) => `${item.month} ${item.rainfall_mm} millimetres`).join(', ');
 
   return (
     <figure className="rainfall-chart">
-      <figcaption>Average monthly rainfall</figcaption>
+      <div className="chart-heading">
+        <figcaption><span>Rainfall climatology</span><small>Average monthly distribution</small></figcaption>
+        <strong>{Math.round(annualAverage).toLocaleString()} <small>mm/yr</small></strong>
+      </div>
       <svg
         width="100%"
         height={totalHeight}

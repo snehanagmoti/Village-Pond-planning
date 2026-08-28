@@ -112,6 +112,7 @@ it('uploads a KML contour map and renders its derived catchment result', async (
   const user = userEvent.setup();
   render(<App />);
 
+  await user.click(screen.getByRole('tab', { name: 'Contour upload' }));
   const file = new File(['<kml />'], 'terrain.kml', { type: 'application/vnd.google-earth.kml+xml' });
   await user.upload(screen.getByLabelText('Contour file'), file);
   await user.click(screen.getByRole('button', { name: 'Analyze contour map' }));
@@ -125,4 +126,29 @@ it('uploads a KML contour map and renders its derived catchment result', async (
   expect(await screen.findByRole('heading', { name: 'Contour-derived pond candidate' })).toBeInTheDocument();
   expect(screen.getByText('392.1225 ha')).toBeInTheDocument();
   expect(screen.getByText('Interpolated surface; field verification required.')).toBeInTheDocument();
+});
+
+test('switches between the live analysis and contour upload workflows', async () => {
+  const user = userEvent.setup();
+  render(<App />);
+
+  const liveTab = screen.getByRole('tab', { name: 'Live analysis' });
+  const contourTab = screen.getByRole('tab', { name: 'Contour upload' });
+
+  expect(liveTab).toHaveAttribute('aria-selected', 'true');
+  expect(screen.getByLabelText('Latitude')).toBeInTheDocument();
+  expect(screen.queryByLabelText('Contour file')).not.toBeInTheDocument();
+
+  await user.click(contourTab);
+
+  expect(contourTab).toHaveAttribute('aria-selected', 'true');
+  expect(screen.getByLabelText('Contour file')).toBeInTheDocument();
+  expect(screen.queryByLabelText('Latitude')).not.toBeInTheDocument();
+  expect(screen.getByText('Select a KML or KMZ contour map to start the file-based analysis.')).toBeInTheDocument();
+
+  await user.click(liveTab);
+
+  expect(liveTab).toHaveAttribute('aria-selected', 'true');
+  expect(screen.getByLabelText('Latitude')).toBeInTheDocument();
+  expect(screen.getByText('Select a location, review the radius, then start the screening analysis.')).toBeInTheDocument();
 });

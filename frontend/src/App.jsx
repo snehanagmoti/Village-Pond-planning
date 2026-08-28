@@ -86,6 +86,7 @@ const hasContourContract = (value) => Boolean(
 
 
 export default function App() {
+  const [workflowMode, setWorkflowMode] = useState('location');
   const [position, setPosition] = useState(null);
   const [villageName, setVillageName] = useState(null);
   const [coordinates, setCoordinates] = useState({ lat: '', lng: '' });
@@ -109,6 +110,7 @@ export default function App() {
     analysisSequenceRef.current += 1;
     analysisAbortRef.current?.abort();
     setLoading(false);
+    setWorkflowMode('location');
     setPosition(nextPosition);
     setCoordinates({ lat: nextPosition.lat.toFixed(6), lng: nextPosition.lng.toFixed(6) });
     setVillageName(name);
@@ -121,6 +123,22 @@ export default function App() {
 
   const handleVillageSelect = (result) => {
     selectLocation({ lat: result.lat, lng: result.lng }, result.display_name.split(',')[0]);
+  };
+
+  const changeWorkflowMode = (mode) => {
+    if (loading) return;
+    setWorkflowMode(mode);
+    setError('');
+    if (analysis || contourAnalysis) return;
+    if (mode === 'contour') {
+      setStatus(contourFile
+        ? `${contourFile.name} selected. Press Analyze contour map to upload and compute the catchment.`
+        : 'Select a KML or KMZ contour map to start the file-based analysis.');
+      return;
+    }
+    setStatus(position
+      ? 'Location selected. Review the analysis radius and press Start screening analysis.'
+      : 'Select a location, review the radius, then start the screening analysis.');
   };
 
   const submitCoordinates = (event) => {
@@ -175,6 +193,7 @@ export default function App() {
 
   const selectContourFile = (event) => {
     const file = event.target.files?.[0] || null;
+    setWorkflowMode('contour');
     setContourFile(file);
     setContourAnalysis(null);
     setError('');
@@ -257,6 +276,11 @@ export default function App() {
   return (
     <main className="app-container" aria-busy={loading}>
       <section className="map-container" aria-label="Satellite map and analysis layers">
+        <div className="map-hud" aria-hidden="true">
+          <span className="map-hud-kicker">Satellite intelligence workspace</span>
+          <strong>{contourAnalysis ? 'Contour catchment model' : analysis ? 'Live watershed model' : position ? 'Study location selected' : 'India terrain overview'}</strong>
+          <span>{contourAnalysis || analysis ? 'Model layers are ready for review' : 'Select a point on the map or use the analysis panel'}</span>
+        </div>
         <MapContainer center={[20.5937, 78.9629]} zoom={5} style={{ height: '100%', width: '100%' }} keyboard>
           <TileLayer
             url={imageryTileUrl}
@@ -318,73 +342,144 @@ export default function App() {
           )}
         </MapContainer>
         {(analysis || contourAnalysis) && <MapLegend mode={contourAnalysis ? 'contour' : 'location'} />}
+        <div className="map-mode-chip" aria-hidden="true">
+          <span className="live-dot" />
+          {loading ? 'Model processing' : analysis || contourAnalysis ? 'Evidence layers active' : 'Map ready'}
+        </div>
       </section>
 
       <aside className="sidebar" aria-label="Pond screening controls and results">
         <header className="header">
-          <p className="eyebrow">Decision-support prototype</p>
-          <h1>Village pond screening</h1>
-          <p>Terrain, rainfall and satellite evidence with explicit quality limits.</p>
+          <div className="brand-row">
+            <div className="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 44 44">
+                <path d="M22 5.5c7.2 9.2 11.2 14.8 11.2 21a11.2 11.2 0 0 1-22.4 0c0-6.2 4-11.8 11.2-21Z" />
+                <path d="M13.5 27.5c4.7-2.7 12.3-2.7 17 0M15.8 32c3.6-1.8 8.8-1.8 12.4 0" />
+              </svg>
+            </div>
+            <div>
+              <p className="eyebrow">Village Pond Intelligence</p>
+              <p className="brand-name">JalDrishti</p>
+            </div>
+            <span className="prototype-chip">Screening</span>
+          </div>
+          <h1>Plan with the landscape, not against it.</h1>
+          <p>Combine terrain, rainfall and satellite evidence into an explainable pond screening model.</p>
         </header>
 
         <div className="screening-warning" role="note">
-          Not a construction design or land-ownership determination. Field and qualified engineering verification are required.
+          <span className="warning-symbol" aria-hidden="true">!</span>
+          <span><strong>Decision support only.</strong> Field survey, ownership checks and qualified engineering verification remain required.</span>
         </div>
 
-        <section className="contour-upload" aria-labelledby="contour-upload-heading">
-          <p className="eyebrow">Phase 2 file workflow</p>
-          <h2 id="contour-upload-heading">Analyze a contour map</h2>
-          <p>Upload a KML or KMZ file containing at least three elevation levels. Results are computed from the uploaded geometry.</p>
-          <form onSubmit={runContourAnalysis}>
-            <label htmlFor="contour-file">Contour file</label>
-            <input id="contour-file" type="file" accept=".kml,.kmz,application/vnd.google-earth.kml+xml,application/vnd.google-earth.kmz" onChange={selectContourFile} />
-            <div className="file-hint">Maximum 15 MiB. KML and KMZ only.</div>
-            <button className="btn" type="submit" disabled={!contourFile || loading}>Analyze contour map</button>
-          </form>
-        </section>
-
-        <div className="workflow-divider"><span>or use live sources by location</span></div>
-
-        <SearchBar onSelect={handleVillageSelect} />
-
-        <form className="coordinate-form" onSubmit={submitCoordinates}>
-          <fieldset>
-            <legend>Or enter coordinates</legend>
-            <label>Latitude<input type="number" step="0.000001" min="-85" max="85" value={coordinates.lat} onChange={(event) => setCoordinates({ ...coordinates, lat: event.target.value })} /></label>
-            <label>Longitude<input type="number" step="0.000001" min="-180" max="180" value={coordinates.lng} onChange={(event) => setCoordinates({ ...coordinates, lng: event.target.value })} /></label>
-          </fieldset>
-          <button className="btn btn-secondary" type="submit">Select coordinates</button>
-        </form>
-
-        <div className="radius-control">
-          <label htmlFor="radius-slider">Analysis radius: <strong>{radiusKm.toFixed(1)} km</strong></label>
-          <input id="radius-slider" type="range" min="0.5" max="5" step="0.5" value={radiusKm} onChange={(event) => setRadiusKm(Number(event.target.value))} />
+        <div className="workflow-switcher" role="tablist" aria-label="Analysis workflow">
+          <button
+            className={workflowMode === 'location' ? 'active' : ''}
+            type="button"
+            role="tab"
+            aria-label="Live analysis"
+            aria-selected={workflowMode === 'location'}
+            aria-controls="location-workflow"
+            disabled={loading}
+            onClick={() => changeWorkflowMode('location')}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s6-5.1 6-11a6 6 0 1 0-12 0c0 5.9 6 11 6 11Z" /><circle cx="12" cy="10" r="2.3" /></svg>
+            <span><strong>Live analysis</strong><small>Search or coordinates</small></span>
+          </button>
+          <button
+            className={workflowMode === 'contour' ? 'active' : ''}
+            type="button"
+            role="tab"
+            aria-label="Contour upload"
+            aria-selected={workflowMode === 'contour'}
+            aria-controls="contour-workflow"
+            disabled={loading}
+            onClick={() => changeWorkflowMode('contour')}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 7 6-3 6 3 6-3v13l-6 3-6-3-6 3V7Z" /><path d="M9 4v13M15 7v13" /></svg>
+            <span><strong>Contour upload</strong><small>KML or KMZ terrain</small></span>
+          </button>
         </div>
 
-        <div className="action-row">
-          <button className="btn" type="button" disabled={!position || loading} onClick={runAnalysis}>Start screening analysis</button>
-          {loading && <button className="btn btn-secondary" type="button" onClick={cancelAnalysis}>Cancel</button>}
-        </div>
+        {workflowMode === 'contour' ? (
+          <section id="contour-workflow" className="workflow-panel contour-upload" role="tabpanel" aria-labelledby="contour-upload-heading">
+            <div className="workflow-heading">
+              <span className="step-number">01</span>
+              <div><p className="eyebrow">File-based terrain model</p><h2 id="contour-upload-heading">Analyze a contour map</h2></div>
+            </div>
+            <p>Upload surveyed contour geometry to reconstruct a terrain surface and derive its contributing catchment.</p>
+            <form onSubmit={runContourAnalysis}>
+              <label htmlFor="contour-file">Contour file</label>
+              <div className="file-dropzone">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v5h14v-5" /></svg>
+                <input id="contour-file" type="file" accept=".kml,.kmz,application/vnd.google-earth.kml+xml,application/vnd.google-earth.kmz" onChange={selectContourFile} />
+              </div>
+              <div className="file-meta"><span>KML / KMZ</span><span>Maximum 15 MiB</span><span>3+ elevation levels</span></div>
+              <button className="btn" type="submit" disabled={!contourFile || loading}>
+                <span>Analyze contour map</span><span aria-hidden="true">→</span>
+              </button>
+            </form>
+          </section>
+        ) : (
+          <section id="location-workflow" className="workflow-panel location-workflow" role="tabpanel" aria-labelledby="location-workflow-heading">
+            <div className="workflow-heading">
+              <span className="step-number">01</span>
+              <div><p className="eyebrow">Live-source screening</p><h2 id="location-workflow-heading">Choose a study area</h2></div>
+            </div>
+            <SearchBar onSelect={handleVillageSelect} />
 
-        <div className="sr-status" aria-live="polite" aria-atomic="true">{status}</div>
+            <div className="workflow-divider"><span>or enter coordinates</span></div>
+
+            <form className="coordinate-form" onSubmit={submitCoordinates}>
+              <fieldset>
+                <legend>Or enter coordinates</legend>
+                <label>Latitude<input type="number" step="0.000001" min="-85" max="85" placeholder="20.5937" value={coordinates.lat} onChange={(event) => setCoordinates({ ...coordinates, lat: event.target.value })} /></label>
+                <label>Longitude<input type="number" step="0.000001" min="-180" max="180" placeholder="78.9629" value={coordinates.lng} onChange={(event) => setCoordinates({ ...coordinates, lng: event.target.value })} /></label>
+              </fieldset>
+              <button className="btn btn-secondary" type="submit">Select coordinates</button>
+            </form>
+
+            <div className="radius-control">
+              <div className="radius-heading"><label htmlFor="radius-slider">Analysis radius</label><strong>{radiusKm.toFixed(1)} km</strong></div>
+              <input id="radius-slider" aria-label={`Analysis radius: ${radiusKm.toFixed(1)} km`} type="range" min="0.5" max="5" step="0.5" value={radiusKm} onChange={(event) => setRadiusKm(Number(event.target.value))} />
+              <div className="radius-scale" aria-hidden="true"><span>0.5 km</span><span>Focused village study</span><span>5 km</span></div>
+            </div>
+
+            <div className="action-row">
+              <button className="btn" type="button" disabled={!position || loading} onClick={runAnalysis}>
+                <span>Start screening analysis</span><span aria-hidden="true">→</span>
+              </button>
+              {loading && <button className="btn btn-secondary" type="button" onClick={cancelAnalysis}>Cancel</button>}
+            </div>
+          </section>
+        )}
+
+        <div className="status-console" aria-live="polite" aria-atomic="true">
+          <span className={`status-indicator ${loading ? 'processing' : error ? 'error' : analysis || contourAnalysis ? 'complete' : ''}`} aria-hidden="true" />
+          <div><span className="status-label">Workspace status</span><p>{status}</p></div>
+        </div>
         {loading && <div className="loading-box" role="status"><span className="spinner" aria-hidden="true" /><span>Checking source coverage and computing the watershed…</span></div>}
         {error && <div className="error-box" role="alert"><p>{error}</p><button className="text-btn" type="button" onClick={contourFile && !position ? runContourAnalysis : runAnalysis}>Try again</button></div>}
 
         {contourAnalysis && (
           <div className="results">
+            <div className="results-heading">
+              <div><p className="eyebrow">Computed evidence</p><h2>Contour screening report</h2><p>Review the model output, quality limits and mapped catchment.</p></div>
+              <button className="icon-btn" type="button" onClick={reset} aria-label="Reset analysis">↺</button>
+            </div>
             <section className={`quality-banner ${contourAnalysis.analysis_status}`}>
               <h2>Contour analysis: {contourAnalysis.analysis_status}</h2>
               <p>Screening-only result. The terrain surface is interpolated from the uploaded contour geometry.</p>
             </section>
 
             {contourAnalysis.quality.warnings.length > 0 && (
-              <section className="warnings" aria-labelledby="contour-warning-heading">
+              <section className="warnings result-card" aria-labelledby="contour-warning-heading">
                 <h2 id="contour-warning-heading">Limitations and warnings</h2>
                 <ul>{contourAnalysis.quality.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
               </section>
             )}
 
-            <section aria-labelledby="contour-summary-heading">
+            <section className="result-card" aria-labelledby="contour-summary-heading">
               <h2 id="contour-summary-heading" className="section-label">Uploaded contour summary</h2>
               <dl className="stats-grid">
                 <div><dt>Input file</dt><dd>{contourAnalysis.input_file}</dd></div>
@@ -402,7 +497,7 @@ export default function App() {
               </dl>
             </section>
 
-            <section className="pond-recommendation" aria-labelledby="contour-pond-heading">
+            <section className="pond-recommendation result-card" aria-labelledby="contour-pond-heading">
               <h2 id="contour-pond-heading">Contour-derived pond candidate</h2>
               <dl>
                 <div><dt>Point</dt><dd>{contourAnalysis.pond_location.lat.toFixed(6)}, {contourAnalysis.pond_location.lng.toFixed(6)}</dd></div>
@@ -412,25 +507,28 @@ export default function App() {
               </dl>
             </section>
 
-            <button className="btn btn-secondary" type="button" onClick={reset}>Reset analysis</button>
           </div>
         )}
 
         {analysis && (
           <div className="results">
+            <div className="results-heading">
+              <div><p className="eyebrow">Computed evidence</p><h2>Watershed screening report</h2><p>Source-aware terrain, runoff and candidate geometry in one review.</p></div>
+              <button className="icon-btn" type="button" onClick={reset} aria-label="Reset analysis">↺</button>
+            </div>
             <section className={`quality-banner ${analysis.analysis_status}`}>
               <h2>Analysis status: {analysis.analysis_status}</h2>
               <p>{analysis.quality.screening_only ? 'Screening-only result. Do not use directly for excavation or construction.' : ''}</p>
             </section>
 
             {analysis.quality.warnings.length > 0 && (
-              <section className="warnings" aria-labelledby="warning-heading">
+              <section className="warnings result-card" aria-labelledby="warning-heading">
                 <h2 id="warning-heading">Limitations and warnings</h2>
                 <ul>{analysis.quality.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
               </section>
             )}
 
-            <section aria-labelledby="source-heading">
+            <section className="result-card" aria-labelledby="source-heading">
               <h2 id="source-heading" className="section-label">Source quality</h2>
               <div className="source-list">
                 {Object.entries(analysis.quality.sources).map(([key, source]) => (
@@ -449,7 +547,7 @@ export default function App() {
               </div>
             </section>
 
-            <section aria-labelledby="terrain-heading">
+            <section className="result-card" aria-labelledby="terrain-heading">
               <h2 id="terrain-heading" className="section-label">Terrain and hydrology</h2>
               <dl className="stats-grid">
                 <div><dt>Minimum elevation</dt><dd>{numberOrDash(analysis.elevation_stats.min_elevation)} m</dd></div>
@@ -464,7 +562,7 @@ export default function App() {
               </dl>
             </section>
 
-            <section aria-labelledby="land-heading">
+            <section className="result-card" aria-labelledby="land-heading">
               <h2 id="land-heading" className="section-label">Satellite surface screening</h2>
               <dl className="stats-grid">
                 <div><dt>Bare surface</dt><dd>{analysis.land_analysis.bare_surface_ratio == null ? 'Unavailable' : `${(analysis.land_analysis.bare_surface_ratio * 100).toFixed(1)}%`}</dd></div>
@@ -476,7 +574,7 @@ export default function App() {
 
             <RainfallChart monthly={analysis.rainfall_data.monthly} />
 
-            <section className="pond-recommendation" aria-labelledby="pond-heading">
+            <section className="pond-recommendation result-card" aria-labelledby="pond-heading">
               <h2 id="pond-heading">Pond screening result</h2>
               {analysis.pond ? (
                 <dl>
@@ -493,7 +591,6 @@ export default function App() {
               ) : <p>No pond candidate was produced because one or more required evidence gates failed.</p>}
             </section>
 
-            <button className="btn btn-secondary" type="button" onClick={reset}>Reset analysis</button>
           </div>
         )}
       </aside>

@@ -68,11 +68,12 @@ export default function SearchBar({ onSelect }) {
             autoComplete="off"
           />
           <button className="compact-btn" type="submit" disabled={loading}>
-            {loading ? 'Searching' : 'Search'}
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" /></svg>
+            <span>{loading ? 'Searching' : 'Search'}</span>
           </button>
         </div>
       </form>
-      <div className="sr-status" aria-live="polite">{message}</div>
+      {message && <div className="search-message" aria-live="polite">{message}</div>}
       {results.length > 0 && (
         <ul className="search-results" aria-label="Place search results">
           {results.map((result) => (
