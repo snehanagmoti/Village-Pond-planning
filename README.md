@@ -22,6 +22,10 @@ quality limitations instead of inventing convincing fallback values.
 - Live interactive API documentation:
   <https://sneha-village-pond-api-2026.onrender.com/docs>
 - Final report source: [Final_Technical_Report.md](Final_Technical_Report.md)
+- Complete illustrated documentation (PDF):
+  [JalDrishti_Complete_Project_Documentation.pdf](output/pdf/JalDrishti_Complete_Project_Documentation.pdf)
+- Editable documentation (DOCX):
+  [JalDrishti_Complete_Project_Documentation.docx](output/docx/JalDrishti_Complete_Project_Documentation.docx)
 - API reference: [docs/API.md](docs/API.md)
 - Deployment guide: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 
@@ -225,6 +229,9 @@ placeholder, and use `docker compose up -d` behind managed HTTPS.
 - `docs/API.md` - request/response and route documentation.
 - `docs/DEPLOYMENT.md` - Render and Docker deployment procedure.
 - `Final_Technical_Report.md` - final report source.
-- `output/pdf/` - rendered final report after generation.
+- `output/pdf/` - submission-ready illustrated documentation PDF.
+- `output/docx/` - editable source for the illustrated documentation.
+- `scripts/build_project_documentation.py` - deterministic DOCX generator.
+- `scripts/generate_documentation_assets.py` - diagram and chart generator.
 - `.github/workflows/ci.yml` - continuous integration quality gates.
 - `render.yaml` and `docker-compose.yml` - cloud and container infrastructure.

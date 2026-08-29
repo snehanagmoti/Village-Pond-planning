@@ -90,9 +90,9 @@ Successful response shape:
     "elevation_m": 270.0,
     "boundary_distance_m": 467.99,
     "local_slope_percent": 2.899,
-    "suitability_score": 95.09,
+    "suitability_score": 95.54,
     "contributing_area_sqm": 3529523.47,
-    "water_distance_m": 120.0,
+    "water_distance_m": 334.35,
     "selection_method": "Highest spatially separated multi-criteria terrain score after boundary, outlet and detected-water checks"
   },
   "candidate_options": [
@@ -100,7 +100,7 @@ Successful response shape:
       "rank": 1,
       "lat": 21.244025,
       "lng": 81.288,
-      "suitability_score": 95.09,
+      "suitability_score": 95.54,
       "contributing_area_hectares": 352.9523,
       "local_slope_percent": 2.899,
       "selected": true
@@ -115,30 +115,30 @@ Successful response shape:
   "catchment": {
     "area_sqm": 3529523.47,
     "area_hectares": 352.9523,
-    "cell_count": 10893,
-    "study_grid_fraction": 0.4175,
+    "cell_count": 10894,
+    "study_grid_fraction": 0.41752,
     "boundary": [{ "lat": 21.23, "lng": 81.28 }]
   },
   "rainfall_data": {
-    "annual_avg_mm": 1324.16,
+    "annual_avg_mm": 1280.13,
     "valid_years": 35,
     "monthly": []
   },
   "runoff_stats": {
     "catchment_area_sqm": 3529523.47,
-    "annual_rainfall_mm": 1324.16,
+    "annual_rainfall_mm": 1280.13,
     "runoff_coefficient": 0.3,
-    "estimated_volume_m3": 1402022.21
+    "estimated_volume_m3": 1355474.66
   },
   "pond": {
     "lat": 21.244025,
     "lng": 81.288,
     "water_depth_m": 4.0,
-    "capacity_m3": 1121617.77
+    "capacity_m3": 1084379.73
   },
   "water_screening": {
     "status": "applied",
-    "detected_water_ratio": 0.015,
+    "detected_water_ratio": 0.0033,
     "exclusion_buffer_m": 60.0,
     "message": "Detected water was excluded before candidate scoring; non-detection is not proof that a river is absent."
   },

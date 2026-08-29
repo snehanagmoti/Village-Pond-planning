@@ -8,7 +8,7 @@
 
 **Submission phase:** Phase 3 - Final implementation and demonstration
 
-**Date:** 28 August 2026
+**Date:** 29 August 2026
 
 **Repository:** https://github.com/snehanagmoti/Village-Pond-planning
 
@@ -42,6 +42,8 @@ design, and statutory approval.
 | Runoff volume | `V = C x A x P` with visible coefficient and documentary basis |
 | Pond depth/capacity | Side-sloped rectangular-frustum screening geometry with freeboard |
 | Selected point and maps | Leaflet point, catchment, study area, candidate land and contour layers |
+| User pond-site choice | Automatic ranking, validated point selection, or polygon-constrained search |
+| River/water safeguard | Detected-water cells and a configurable 60 m buffer are hard-excluded before scoring |
 | KML/KMZ backend route | `POST /api/analyze-contour` plus assignment-compatible aliases |
 | Structured result | Strict Pydantic JSON models, stable errors and OpenAPI documentation |
 | Generalized implementation | All locations, geometry, elevations and outputs derived from input |
@@ -122,19 +124,37 @@ The shared deterministic pipeline performs:
 3. a very small deterministic gradient for equal-elevation flats;
 4. steepest lower-neighbor D8 flow direction;
 5. topological upstream flow accumulation;
-6. candidate selection by maximum contributing area, with lower elevation as
-   the tie-breaker;
-7. reverse graph traversal to collect all cells draining to that candidate;
-8. latitude-corrected catchment-area calculation; and
-9. simplified WGS84 boundary extraction for JSON and Leaflet.
+6. local-slope, relative-elevation, analysis-boundary-clearance, and detected-
+   water-clearance calculation;
+7. hard eligibility filtering that rejects cells outside the study area, inside
+   the configurable boundary or detected-water setbacks, on a terminal outlet,
+   or without a valid upstream land catchment;
+8. explainable multi-criteria ranking. When water evidence is available, the
+   score uses 52% logarithmic contributing area, 20% local flatness, 10% lower
+   relative elevation, 8% boundary clearance, and 10% water clearance. Without
+   water evidence the normalized weights are 58%, 22%, 11%, and 9%;
+9. deterministic non-maximum suppression that keeps three alternatives at
+   least 100 m or three grid cells apart;
+10. selection by the top automatic option, a user point snapped to an eligible
+    grid cell, or the highest-scoring cell inside a user-drawn polygon;
+11. reverse graph traversal to collect every cell draining to the actually
+    selected candidate, rather than the larger study-area outlet watershed;
+12. latitude-corrected catchment-area calculation; and
+13. simplified WGS84 boundary extraction for JSON and Leaflet.
+
+Manual selections pass the same hard safeguards as automatic options. An
+outside, boundary-setback, outlet, or detected-water point returns a typed 422
+error instead of a plausible-looking result. Changing the selected option
+restarts reverse traversal and therefore recomputes catchment, rainfall-based
+runoff, capacity, dimensions, and excavation volume for that point.
 
 No sample coordinate, candidate point, catchment boundary, area, or expected
 elevation is stored in the implementation.
 
 ### 4.4 Provided-map result
 
-The supplied `contours_1m.kml` was processed through the deployed service on 28
-August 2026. The measured output was:
+The supplied `contours_1m.kml` was processed through release `0a385c0` of the
+deployed service on 29 August 2026. The measured automatic output was:
 
 | Metric | Result |
 | --- | ---: |
@@ -147,11 +167,41 @@ August 2026. The measured output was:
 | Cell size | 18.0 m |
 | Directly observed analysis cells | 85.206% |
 | Harmonic iterations | 31, converged |
-| Candidate coordinate | 21.239822, 81.286438 |
-| Candidate interpolated elevation | 271.323 m |
-| Modelled catchment | 3,921,224.77 m2 / 392.1225 ha |
-| Catchment cells | 12,103 |
-| Catchment share of study grid | 46.386% |
+| Candidate coordinate | 21.244025, 81.288000 |
+| Candidate interpolated elevation | 270.0 m |
+| Candidate suitability | 95.54 / 100 |
+| Local slope | 2.899% |
+| Boundary / detected-water clearance | 467.99 m / 334.35 m |
+| Modelled catchment | 3,529,523.47 m2 / 352.9523 ha |
+| Catchment cells | 10,894 |
+| Catchment share of study grid | 41.752% |
+| Historical rainfall | 1,280.13 mm/year, 35 valid years |
+| Screening runoff volume | 1,355,474.66 m3/year at C = 0.30 |
+| Preliminary pond capacity | 1,084,379.73 m3 |
+| Preliminary excavation volume | 1,224,734.67 m3 |
+| Production API time | 12.47 s, HTTP 200 |
+
+The three returned alternatives were:
+
+| Rank | Coordinate | Score | Upstream area | Slope | Water clearance |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | 21.244025, 81.288000 | 95.54 | 352.9523 ha | 2.899% | 334.35 m |
+| 2 | 21.242893, 81.286959 | 95.16 | 381.4633 ha | 2.777% | 262.63 m |
+| 3 | 21.245156, 81.289215 | 95.04 | 301.1143 ha | 2.777% | 435.54 m |
+
+Selecting option 3 as a point produced the exact 301.1143 ha upstream
+catchment, 1,156,396.32 m3/year runoff, and 925,117.06 m3 capacity. Restricting
+the search to a small polygon around option 2 selected that point and produced
+381.4633 ha, 1,464,967.75 m3/year runoff, and 1,171,974.20 m3 capacity. This
+proves that each output is recomputed for the selected point rather than copied
+from the automatic result. A KMZ created from the same KML produced an identical
+automatic result. An outside manual point returned HTTP 422 with
+`invalid_contour_selection`.
+
+Production satellite screening detected 0.33% water-like pixels and applied the
+60 m hard exclusion before ranking. A separate deterministic synthetic-river
+test placed the water mask over the otherwise best KML candidate and verified
+that the point was rejected as inside the exclusion buffer.
 
 These figures demonstrate the working algorithm on the provided map; they are
 not a field-verified pond recommendation.
@@ -211,12 +261,18 @@ OpenCV screens broad HSV/RGB classes for vegetation, water-like pixels, brown or
 sandy surface, and low-saturation surface. Morphological cleanup removes small
 noise. The largest qualifying region becomes a **bare-surface candidate**, and
 candidate placement is restricted to its intersection with the modelled
-catchment.
+catchment. Water is treated differently from an ordinary score: detected water
+and a configurable 60 m metric buffer are removed from the candidate mask before
+ranking in both workflows. Candidate cards report their measured clearance from
+detected water.
 
 Satellite color cannot prove government ownership, legal availability, soil,
 rock, crops, seasonal water, utilities, protected status, or excavation
-suitability. Therefore the UI and API never describe this polygon as verified
-government land. Cadastral and field verification are mandatory.
+suitability. It can also miss a narrow, muddy, shaded, seasonal, cloud-covered,
+or recently shifted river. Therefore the UI and API never describe this polygon
+as verified government land and never treat water non-detection as proof that a
+river is absent. Cadastral, hydrography, field, and engineering verification are
+mandatory.
 
 ## 8. Runoff and pond geometry
 
@@ -250,11 +306,18 @@ forebay, ramp, fencing, slope stabilization, or construction sequence.
 ## 9. Frontend and visualization
 
 The responsive sidebar contains a Phase 2 file uploader plus place search,
-coordinate entry, radius selection, request start/cancel controls, and reset. The
-map displays satellite imagery and relevant result layers. Contour-upload results
-show the uploaded study boundary, computed catchment, and candidate point.
-Location results can show catchment, DEM contours, surface candidate, selected
-centre, and pond candidate.
+coordinate entry, radius selection, request start/cancel controls, and reset.
+For an uploaded contour map, the user can keep automatic ranking, click one
+eligible map point, or draw a polygon that restricts the search. Ranked option
+cards can also recompute the result with one action. The entire results panel is
+collapsible so it does not hide the map.
+
+The map displays satellite imagery and individually toggleable evidence layers.
+Contour-upload results show reconstructed contour lines, uploaded analysis
+extent, computed catchment, modelled drainage path, the separate hydrology
+outlet, and numbered pond alternatives. The legend explicitly explains that the
+orange outlet is evidence, not a pond recommendation. Location results show the
+catchment, DEM contours, surface candidate, selected centre, and pond options.
 
 Results include source panels, quality chips, warnings, terrain/hydrology
 statistics, monthly rainfall chart, land-screening ratios, runoff assumptions,
@@ -300,52 +363,60 @@ The final local quality matrix includes:
 
 | Gate | Result |
 | --- | --- |
-| Backend Pytest suite | 60 passed |
-| Backend statement coverage | 81.99%, above 70% CI threshold |
+| Backend Pytest suite | 68 passed |
+| Backend statement coverage | 88.79%, above 70% CI threshold |
 | Python Ruff lint | Passed |
 | Python dependency consistency | `pip check` passed |
 | Python vulnerability audit | 0 known vulnerabilities |
-| Frontend Vitest suite | 7 passed |
+| Frontend Vitest suite | 11 passed |
 | Frontend Oxlint | Passed with 0 warnings |
 | Vite production build | Passed |
 | npm high-severity audit | 0 vulnerabilities |
-| Provided KML direct analysis | Passed, converged in approximately 3 seconds |
-| Provided KML API upload | HTTP 200 with typed response |
+| Provided KML direct analysis | Passed; automatic, point, region, and synthetic-water cases |
+| Hosted KML automatic upload | HTTP 200 in 12.47 s with complete typed response |
+| Hosted manual point selection | HTTP 200; catchment recomputed to 301.1143 ha |
+| Hosted region selection | HTTP 200; option 2 selected, 381.4633 ha |
+| Hosted KMZ upload | HTTP 200; result matched the source KML |
+| Hosted invalid point | HTTP 422, typed `invalid_contour_selection` |
 | OpenAPI schema route | Passed |
 | Docker backend build | Included in local/CI verification |
 | Docker frontend build | Included in local/CI verification |
 | Alembic PostgreSQL migration | Included in GitHub Actions |
-| GitHub Actions CI on deployed commit `e782496` | Passed |
 | Hosted frontend and security headers | HTTP 200; frame, MIME and referrer headers passed |
-| Hosted API liveness and OpenAPI | HTTP 200 |
-| Hosted supplied-KML upload | HTTP 200 in 6.89 s; 392.1225 ha catchment |
-| Hosted 2 km location analysis | 35 rainfall years; 1,190.0826 ha catchment; pond branch returned |
+| Hosted API readiness and OpenAPI | Verified through the deployed service |
+| Hosted 2 km location analysis | 35 rainfall years; 152.07 ha selected catchment; three pond options |
 
 Backend tests cover contour/KMZ safety, parsing variants, KML route behavior,
-input limits, D8 flow, accumulation, catchment traversal, priority-flood,
-masking, runoff equations, frustum sizing, imagery validation, rainfall gaps,
-upstream failures, response quality, security defaults, rate limiting, health,
-and privacy defaults. Frontend tests cover explicit search, search validation,
-rainfall rendering, select-then-confirm analysis, and the KML upload contract.
+input limits, D8 flow, accumulation, selected-point catchment traversal,
+priority-flood, boundary/water masking, option separation, manual point and
+region validation, runoff equations, frustum sizing, imagery validation,
+rainfall gaps, upstream failures, response quality, security defaults, rate
+limiting, health, and privacy defaults. Frontend tests cover explicit search,
+search validation, rainfall rendering, select-then-confirm analysis, KML upload,
+ranked options, complete output rendering, and contour-selection interactions.
 
 ## 13. Deployment and submission
 
 The repository contains `render.yaml` for repeatable deployment in the Singapore
-region. The following endpoints were deployed and verified on 28 August 2026:
+region. Release `0a385c0` was deployed and verified on 29 August 2026:
 
 - Frontend: https://sneha-village-pond-planning-2026.onrender.com
 - API: https://sneha-village-pond-api-2026.onrender.com
 - API documentation: https://sneha-village-pond-api-2026.onrender.com/docs
 
 Free Render web services can sleep after inactivity, so the first API request
-may require a cold-start wait. The hosted KML verification processed all 1,355
-contours and 159,113 source vertices in 6.89 seconds, returning the same
-392.1225 ha catchment and candidate coordinates as local and Docker tests.
-The final hosted location test also exercised the fallback rainfall and complete
-pond paths: 35 complete rainfall years, 1,324.16 mm mean annual rainfall, a
-1,190.0826 ha modelled catchment, 4,727,579.5 m3 screening runoff, and a pond
-candidate. Its degraded quality status and field-verification warnings are
-intentional and visible to the user.
+may require a cold-start wait. The final hosted KML verification processed all
+1,355 contours and 159,113 source vertices in 12.47 seconds, returned three
+ranked and water-screened alternatives, and completed the rainfall, runoff, and
+pond-geometry branches. Point and region re-selection, KMZ upload, and negative
+selection rejection were then exercised against the same deployed release.
+
+The final hosted location test also exercised the complete fallback rainfall and
+pond paths: 35 complete rainfall years, 1,324.2 mm mean annual rainfall, a
+152.07 ha catchment upstream of the selected pond option, 604,080 m3 screening
+runoff, 483,264 m3 capacity, and three spatially separated alternatives. Its
+degraded quality status and field-verification warnings are intentional and
+visible to the user.
 Docker deployment and post-deploy checks are documented separately in
 `docs/DEPLOYMENT.md`.
 
@@ -380,12 +451,13 @@ geometry, API contracts, deployment, and limitations.
 ## 16. Conclusion
 
 The completed project satisfies the assignment's software deliverables with a
-generalized Phase 2 KML/KMZ catchment API, an integrated accessible frontend,
-source-aware terrain/rainfall/imagery analysis, configurable runoff and pond
-screening, API and installation documentation, deployment infrastructure, and a
-repeatable automated test matrix. The main design achievement is not only
-producing a result, but distinguishing computed screening evidence from facts
-that require cadastral, survey, environmental, and engineering authority.
+generalized Phase 2 KML/KMZ catchment API, automatic and user-guided pond-site
+selection, upstream catchment recomputation, detected-river exclusion,
+historical rainfall, runoff and preliminary pond geometry, an integrated
+accessible frontend, deployment infrastructure, and a repeatable test matrix.
+The main design achievement is not only producing a result, but offering
+traceable alternatives while distinguishing computed screening evidence from
+facts that require cadastral, survey, environmental, and engineering authority.
 
 ## References
 
@@ -399,3 +471,7 @@ that require cadastral, survey, environmental, and engineering authority.
 8. AWS Open Data Terrain Tiles: https://registry.opendata.aws/terrain-tiles/
 9. Tilezen Terrarium format: https://github.com/tilezen/joerd/blob/master/docs/formats.md
 10. NASA POWER Daily API: https://power.larc.nasa.gov/docs/services/api/temporal/daily/
+11. Barnes et al., Priority-Flood depression filling: https://arxiv.org/abs/1511.04463
+12. O'Callaghan and Mark, D8 drainage networks: https://doi.org/10.1016/S0734-189X(84)80011-0
+13. OGC KML 2.3 standard: https://docs.ogc.org/is/12-007r2/12-007r2.html
+14. USDA NRCS runoff-volume guidance: https://directives.nrcs.usda.gov/sites/default/files2/1720531480/Chapter%2002%20-%20Estimating%20Runoff%20Volume%20and%20Peak%20Discharge.pdf
