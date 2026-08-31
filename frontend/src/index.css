@@ -218,31 +218,31 @@ ul { margin: 0; padding-left: 20px; }
   text-transform: uppercase;
 }
 
-.screening-warning, .quality-banner, .warnings, .loading-box, .error-box {
+.project-note, .quality-banner, .technical-notes, .loading-box, .error-box {
   border: 1px solid var(--line);
   border-radius: 14px;
   line-height: 1.45;
   font-size: 0.8rem;
 }
-.screening-warning {
+.project-note {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 11px;
   padding: 12px 13px;
-  color: #d4ddd9;
-  background: rgba(255, 200, 87, 0.055);
-  border-color: rgba(255, 200, 87, 0.18);
+  color: var(--muted);
+  background: rgba(85, 230, 178, 0.055);
+  border-color: rgba(85, 230, 178, 0.18);
 }
-.screening-warning strong { color: #ffe5a9; }
-.warning-symbol {
+.project-note strong { color: var(--mint); }
+.note-symbol {
   width: 22px;
   height: 22px;
   display: grid;
   place-items: center;
   flex: 0 0 auto;
-  color: #221800;
+  color: #04261f;
   border-radius: 7px;
-  background: var(--warning);
+  background: var(--mint);
   font-size: 0.72rem;
   font-weight: 900;
 }
@@ -496,10 +496,14 @@ input[type="search"]:focus, input[type="number"]:focus { border-color: rgba(85, 
 .quality-banner.degraded { color: #ffe4a1; border-color: rgba(255, 200, 87, 0.28); background: linear-gradient(135deg, rgba(255, 200, 87, 0.095), rgba(255, 200, 87, 0.035)); }
 .quality-banner.complete { color: #b8f8d6; border-color: rgba(111, 232, 170, 0.28); background: rgba(111, 232, 170, 0.07); }
 .quality-banner.incomplete { color: #ffd2d3; border-color: rgba(255, 143, 145, 0.28); background: rgba(255, 143, 145, 0.07); }
-.quality-banner h2, .warnings h2 { color: var(--text); font-size: 0.9rem; }
+.quality-banner h2 { color: var(--text); font-size: 0.9rem; }
 .quality-banner p { color: var(--muted); font-size: 0.72rem; }
-.warnings { border-color: rgba(255, 200, 87, 0.18); background: rgba(255, 200, 87, 0.035); }
-.warnings ul { display: grid; gap: 8px; color: var(--muted); font-size: 0.71rem; line-height: 1.45; }
+.technical-notes { padding: 0; overflow: hidden; background: rgba(3, 20, 18, 0.32); }
+.technical-notes summary { padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; gap: 10px; cursor: pointer; color: var(--text); font-size: 0.76rem; font-weight: 760; }
+.technical-notes summary::marker { color: var(--mint); }
+.technical-notes[open] summary { border-bottom: 1px solid var(--line); }
+.technical-notes ul { padding: 12px 28px 14px 34px; display: grid; gap: 8px; color: var(--muted); font-size: 0.69rem; line-height: 1.48; }
+.note-count { min-width: 23px; padding: 2px 7px; border: 1px solid rgba(85, 230, 178, 0.28); border-radius: 999px; color: var(--mint); text-align: center; font-size: 0.58rem; }
 .section-label { margin-bottom: 1px; }
 .source-list { display: grid; gap: 7px; }
 .source-list details { overflow: hidden; border: 1px solid var(--line); border-radius: 11px; background: rgba(3, 20, 18, 0.35); }

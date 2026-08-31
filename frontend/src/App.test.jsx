@@ -175,7 +175,10 @@ it('uploads a KML contour map and renders its derived catchment result', async (
   expect(body.get('contour_file')).toBe(file);
   expect(body.get('selection_mode')).toBe('automatic');
   expect(config.signal).toBeInstanceOf(AbortSignal);
+  expect(await screen.findByRole('heading', { name: 'Contour analysis complete' })).toBeInTheDocument();
   expect(await screen.findByRole('heading', { name: 'Selected pond screening result' })).toBeInTheDocument();
+  expect(screen.getByText('Contour data notes')).toBeInTheDocument();
+  expect(screen.queryByText('Limitations and warnings')).not.toBeInTheDocument();
   expect(screen.getByText('392.1225 ha')).toBeInTheDocument();
   expect(screen.getByText('Estimated runoff volume')).toBeInTheDocument();
   expect(screen.getByText((content) => content.replaceAll(',', '').includes('1058731 m³/year'))).toBeInTheDocument();

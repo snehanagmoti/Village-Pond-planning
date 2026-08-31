@@ -53,7 +53,7 @@ quality limitations instead of inventing convincing fallback values.
   coefficient-based annual runoff, and returns preliminary pond depth,
   dimensions, storage capacity, and excavation geometry;
 - returns a typed JSON response containing contour summary, grid quality,
-  candidate point, catchment area and boundary, provenance, and warnings;
+  candidate point, catchment area and boundary, provenance, and technical notes;
 - exposes the canonical `POST /api/analyze-contour` route plus compatible
   `/api/analyzeContour` and `/api/findCatchment` aliases;
 - provides a complete upload workflow in the React frontend and Swagger/ReDoc
@@ -73,7 +73,7 @@ quality limitations instead of inventing convincing fallback values.
 - peak discharge only when an approved design intensity is configured;
 - side-sloped pond geometry with water depth, freeboard, water dimensions,
   excavation crest/bottom dimensions, capacity, excavation volume, and area;
-- visible source provenance, analysis status, warnings, cancellation, stale
+- visible source provenance, analysis status, expandable technical notes, cancellation, stale
   response protection, responsive layout, and accessible status messages;
 - reproducible Docker Compose and Render Blueprint deployments;
 - automated backend, frontend, migration, dependency, and container CI gates.

@@ -94,6 +94,11 @@ function FitEvidence({ points, panelOpen }) {
 
 const polygonPositions = (polygon = []) => polygon.map((point) => [point.lat, point.lng]);
 const numberOrDash = (value, digits = 1) => value == null ? '—' : Number(value).toLocaleString(undefined, { maximumFractionDigits: digits });
+const sourceStatusLabel = (status) => ({
+  reliable: 'Ready',
+  degraded: 'Public-data',
+  unavailable: 'Unavailable',
+})[status] || status;
 const MAX_CONTOUR_FILE_BYTES = 15 * 1024 * 1024;
 const hasAnalysisContract = (value) => Boolean(
   value
@@ -123,6 +128,18 @@ const hasContourContract = (value) => Boolean(
   && value.quality?.sources
   && Array.isArray(value.quality.warnings),
 );
+
+
+function TechnicalNotes({ warnings, label }) {
+  const notes = [...new Set(warnings || [])];
+  if (notes.length === 0) return null;
+  return (
+    <details className="technical-notes result-card">
+      <summary><span>{label}</span><span className="note-count">{notes.length}</span></summary>
+      <ul>{notes.map((warning) => <li key={warning}>{warning}</li>)}</ul>
+    </details>
+  );
+}
 
 
 export default function App() {
@@ -238,7 +255,9 @@ export default function App() {
         throw new Error('The API returned an unsupported analysis contract.');
       }
       setAnalysis(response.data);
-      setStatus(`Analysis finished with ${response.data.analysis_status} status.`);
+      setStatus(response.data.analysis_status === 'incomplete'
+        ? 'Analysis finished, but one or more required evidence sources were unavailable.'
+        : 'Analysis complete. Review the computed catchment, pond options and evidence sources.');
       setFlyTarget([position.lat, position.lng]);
     } catch (requestError) {
       if (requestError?.code === 'ERR_CANCELED') {
@@ -324,7 +343,7 @@ export default function App() {
       setPosition(null);
       setVillageName(null);
       setCoordinates({ lat: '', lng: '' });
-      setStatus('Contour analysis finished. The result is screening-only because the surface is interpolated from contour lines.');
+      setStatus('Contour analysis complete. Review the selected option and its computed catchment.');
       setFlyTarget([response.data.pond_location.lat, response.data.pond_location.lng]);
     } catch (requestError) {
       if (requestError?.code === 'ERR_CANCELED') {
@@ -580,15 +599,15 @@ export default function App() {
               <p className="eyebrow">Village Pond Intelligence</p>
               <p className="brand-name">JalDrishti</p>
             </div>
-            <span className="prototype-chip">Screening</span>
+            <span className="prototype-chip">Course project</span>
           </div>
           <h1>Plan with the landscape, not against it.</h1>
           <p>Combine terrain, rainfall and satellite evidence into an explainable pond screening model.</p>
         </header>
 
-        <div className="screening-warning" role="note">
-          <span className="warning-symbol" aria-hidden="true">!</span>
-          <span><strong>Decision support only.</strong> Field survey, ownership checks and qualified engineering verification remain required.</span>
+        <div className="project-note" role="note">
+          <span className="note-symbol" aria-hidden="true">i</span>
+          <span><strong>Course-project model.</strong> Validate the selected site locally before construction.</span>
         </div>
 
         <div className="workflow-switcher" role="tablist" aria-label="Analysis workflow">
@@ -693,9 +712,9 @@ export default function App() {
               <div><p className="eyebrow">Computed evidence</p><h2>Contour screening report</h2><p>Review the model output, quality limits and mapped catchment.</p></div>
               <button className="icon-btn" type="button" onClick={reset} aria-label="Reset analysis">↺</button>
             </div>
-            <section className={`quality-banner ${contourAnalysis.analysis_status}`}>
-              <h2>Contour analysis: {contourAnalysis.analysis_status}</h2>
-              <p>Screening-only result. The terrain surface is interpolated from the uploaded contour geometry.</p>
+            <section className={`quality-banner ${contourAnalysis.analysis_status === 'incomplete' ? 'incomplete' : 'complete'}`}>
+              <h2>{contourAnalysis.analysis_status === 'incomplete' ? 'Contour analysis incomplete' : 'Contour analysis complete'}</h2>
+              <p>Catchment and pond options were computed from the uploaded contour elevations.</p>
             </section>
 
             <section className="result-card contour-selection-tools" aria-labelledby="contour-selection-heading">
@@ -734,12 +753,7 @@ export default function App() {
               )}
             </section>
 
-            {contourAnalysis.quality.warnings.length > 0 && (
-              <section className="warnings result-card" aria-labelledby="contour-warning-heading">
-                <h2 id="contour-warning-heading">Limitations and warnings</h2>
-                <ul>{contourAnalysis.quality.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
-              </section>
-            )}
+            <TechnicalNotes warnings={contourAnalysis.quality.warnings} label="Contour data notes" />
 
             <section className="result-card" aria-labelledby="contour-summary-heading">
               <h2 id="contour-summary-heading" className="section-label">Uploaded contour summary</h2>
@@ -772,7 +786,7 @@ export default function App() {
 
             <section className="result-card" aria-labelledby="contour-options-heading">
               <h2 id="contour-options-heading" className="section-label">Pond location options</h2>
-              <p>Options are separated on the map and ranked from the same terrain evidence. Option 1 is not an engineering approval.</p>
+              <p>Options are spatially separated and ranked from the same terrain evidence. Select any option to recompute its catchment and pond geometry.</p>
               <div className="candidate-option-list">
                 {contourAnalysis.candidate_options.map((option) => (
                   <article key={`${option.rank}:${option.lat}:${option.lng}`} className={option.selected ? 'selected' : ''}>
@@ -840,7 +854,7 @@ export default function App() {
               <div className="source-list">
                 {Object.entries(contourAnalysis.quality.sources).map(([key, source]) => (
                   <details key={key}>
-                    <summary><span>{source.name}</span><span className={`status-chip ${source.status}`}>{source.status}</span></summary>
+                    <summary><span>{source.name}</span><span className={`status-chip ${source.status}`}>{sourceStatusLabel(source.status)}</span></summary>
                     <dl>
                       {source.resolution && <><dt>Resolution</dt><dd>{source.resolution}</dd></>}
                       {source.period && <><dt>Period</dt><dd>{source.period}</dd></>}
@@ -863,23 +877,24 @@ export default function App() {
               <button className="icon-btn" type="button" onClick={reset} aria-label="Reset analysis">↺</button>
             </div>
             <section className={`quality-banner ${analysis.analysis_status}`}>
-              <h2>Analysis status: {analysis.analysis_status}</h2>
-              <p>{analysis.quality.screening_only ? 'Screening-only result. Do not use directly for excavation or construction.' : ''}</p>
+              <h2>{analysis.analysis_status === 'complete'
+                ? 'Analysis complete'
+                : analysis.analysis_status === 'degraded'
+                  ? 'Analysis complete with public-data constraints'
+                  : 'Analysis incomplete'}</h2>
+              <p>{analysis.analysis_status === 'incomplete'
+                ? 'A required evidence source or calculation gate was unavailable.'
+                : 'Core calculations completed. Open the technical notes for source-resolution details.'}</p>
             </section>
 
-            {analysis.quality.warnings.length > 0 && (
-              <section className="warnings result-card" aria-labelledby="warning-heading">
-                <h2 id="warning-heading">Limitations and warnings</h2>
-                <ul>{analysis.quality.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
-              </section>
-            )}
+            <TechnicalNotes warnings={analysis.quality.warnings} label="Technical notes" />
 
             <section className="result-card" aria-labelledby="source-heading">
               <h2 id="source-heading" className="section-label">Source quality</h2>
               <div className="source-list">
                 {Object.entries(analysis.quality.sources).map(([key, source]) => (
                   <details key={key}>
-                    <summary><span>{source.name}</span><span className={`status-chip ${source.status}`}>{source.status}</span></summary>
+                    <summary><span>{source.name}</span><span className={`status-chip ${source.status}`}>{sourceStatusLabel(source.status)}</span></summary>
                     <dl>
                       {source.resolution && <><dt>Resolution</dt><dd>{source.resolution}</dd></>}
                       {source.period && <><dt>Period</dt><dd>{source.period}</dd></>}

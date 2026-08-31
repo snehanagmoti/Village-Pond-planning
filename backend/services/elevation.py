@@ -325,7 +325,7 @@ async def fetch_elevation_grid(
     if public_quota_limited:
         messages.append(
             f"Public API quota limited the analysis grid to {grid_size}×{grid_size}; "
-            "configure a reserved or self-hosted elevation endpoint for native-resolution coverage"
+            "the model used a coarser grid while preserving the full study extent"
         )
     source = SourceInfo(
         name="Open-Meteo Elevation API / Copernicus DEM GLO-90 (2021)",

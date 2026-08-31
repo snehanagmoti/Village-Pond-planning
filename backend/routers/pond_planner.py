@@ -369,9 +369,7 @@ async def analyze_location(payload: AnalysisRequest, http_request: Request) -> A
         imagery_task, rainfall_task, return_exceptions=True
     )
 
-    warnings = [
-        "Screening result only: cadastral ownership, hydrogeology, soils, groundwater, structures, utilities and field conditions are not verified."
-    ]
+    warnings = []
     sources: dict[str, SourceMetadata] = {"elevation": _source_model(elevation_result.source)}
     if elevation_result.source.message:
         warnings.append(elevation_result.source.message)
@@ -480,15 +478,10 @@ async def analyze_location(payload: AnalysisRequest, http_request: Request) -> A
     peak_discharge = None
     if coefficient is not None and annual_rainfall is not None:
         volume = calculate_runoff(terrain["catchment_area_sqm"], annual_rainfall, coefficient)
-        warnings.append(
-            "Annual runoff is a screening water-yield estimate; evaporation, infiltration, sediment reserve, routing and environmental releases are not modelled."
-        )
         if settings.design_rainfall_intensity_mm_h is not None:
             peak_discharge = calculate_peak_discharge(
                 terrain["catchment_area_sqm"], settings.design_rainfall_intensity_mm_h, coefficient
             )
-        else:
-            warnings.append("Peak discharge is unavailable because no approved design rainfall intensity is configured.")
 
     pond = None
     if volume is not None and terrain["pond_location"] is not None:

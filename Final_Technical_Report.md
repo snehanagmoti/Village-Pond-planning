@@ -47,7 +47,7 @@ design, and statutory approval.
 | KML/KMZ backend route | `POST /api/analyze-contour` plus assignment-compatible aliases |
 | Structured result | Strict Pydantic JSON models, stable errors and OpenAPI documentation |
 | Generalized implementation | All locations, geometry, elevations and outputs derived from input |
-| Accessible frontend | Responsive keyboard-friendly React UI with explicit status/warnings |
+| Accessible frontend | Responsive keyboard-friendly React UI with clear completion status and expandable technical notes |
 | Installation/API docs | README, `docs/API.md`, `docs/DEPLOYMENT.md`, Swagger and ReDoc |
 | Testing/code quality | Automated unit/API/UI tests, lint, coverage, audits, migrations and builds |
 
@@ -319,7 +319,7 @@ outlet, and numbered pond alternatives. The legend explicitly explains that the
 orange outlet is evidence, not a pond recommendation. Location results show the
 catchment, DEM contours, surface candidate, selected centre, and pond options.
 
-Results include source panels, quality chips, warnings, terrain/hydrology
+Results include source panels, quality chips, expandable technical notes, terrain/hydrology
 statistics, monthly rainfall chart, land-screening ratios, runoff assumptions,
 and pond dimensions. Form labels, keyboard focus, high contrast, live regions,
 text alternatives, reduced-motion support, and responsive breakpoints improve
@@ -414,9 +414,11 @@ selection rejection were then exercised against the same deployed release.
 The final hosted location test also exercised the complete fallback rainfall and
 pond paths: 35 complete rainfall years, 1,324.2 mm mean annual rainfall, a
 152.07 ha catchment upstream of the selected pond option, 604,080 m3 screening
-runoff, 483,264 m3 capacity, and three spatially separated alternatives. Its
-degraded quality status and field-verification warnings are intentional and
-visible to the user.
+runoff, 483,264 m3 capacity, and three spatially separated alternatives. The API
+retains its source-quality status, while the course-project interface presents
+successful calculations as complete with public-data constraints. Repeated
+generic cautions were removed; evidence-specific caveats remain available in
+the expandable technical notes.
 Docker deployment and post-deploy checks are documented separately in
 `docs/DEPLOYMENT.md`.
 

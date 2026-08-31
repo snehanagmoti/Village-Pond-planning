@@ -221,8 +221,8 @@ def analyze_satellite_image(image: np.ndarray) -> LandCoverResult:
         candidate_contour=largest,
         status="degraded",
         message=(
-            "RGB/HSV screening applies a conservative pixel buffer around detected water, but cannot establish "
-            "ownership, soil suitability, structures, crops, legal availability, or complete river detection"
+            "Color-based surface screening excludes detected water with a conservative buffer; "
+            "confirm seasonal rivers and land conditions during the site visit"
         ),
         candidate_mask=candidate_mask,
         water_mask=water,

@@ -98,6 +98,7 @@ async def test_analysis_contract_exposes_quality_and_uses_no_fallback(monkeypatc
     assert data["candidate_land_polygon"] == []
     assert data["runoff_stats"]["runoff_coefficient"] is None
     assert data["persistence"]["status"] == "disabled"
+    assert not any("cadastral ownership" in note for note in data["quality"]["warnings"])
 
 
 @pytest.mark.anyio
@@ -199,6 +200,8 @@ async def test_approved_coefficient_produces_consistent_screening_geometry(monke
     assert data["pond"]["excavation_volume_m3"] > data["pond"]["capacity_m3"]
     assert data["pond"]["excavation_footprint_area_sqm"] <= 20_000
     assert data["runoff_stats"]["runoff_coefficient_basis"] == "Approved field study 2026"
+    assert not any("Annual runoff is a screening" in note for note in data["quality"]["warnings"])
+    assert not any("Peak discharge is unavailable" in note for note in data["quality"]["warnings"])
 
 
 @pytest.mark.anyio
