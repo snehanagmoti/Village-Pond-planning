@@ -484,7 +484,6 @@ def analyze_contour_file(
     warnings = [
         "The elevation grid is interpolated from uploaded contour lines; verify the result against the original survey or DEM.",
         "The uploaded polygon is used as an analysis extent, not as proof that every enclosed cell is buildable or suitable for a pond.",
-        "Candidate scores combine upstream contributing area, local slope, relative elevation, boundary clearance and available detected-water clearance; they are comparative screening scores, not construction approvals.",
         "The catchment is limited to the uploaded contour coverage and may omit drainage from outside the map boundary.",
     ]
     if water_exclusion is None:

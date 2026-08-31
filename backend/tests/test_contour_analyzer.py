@@ -264,6 +264,10 @@ async def test_contour_upload_api_and_assignment_alias(client):
     assert payload["rainfall_data"]["annual_avg_mm"] == 900.0
     assert payload["runoff_stats"]["estimated_volume_m3"] > 0
     assert payload["pond"]["capacity_m3"] > 0
+    assert not any("comparative screening scores" in note for note in payload["quality"]["warnings"])
+    assert not any("Annual runoff is a screening" in note for note in payload["quality"]["warnings"])
+    assert not any("Peak discharge is unavailable" in note for note in payload["quality"]["warnings"])
+    assert not any("Contour-workflow pond dimensions" in note for note in payload["quality"]["warnings"])
     assert payload["water_screening"]["status"] == "applied"
 
     alias_response = await client.post("/api/analyzeContour", files=files)

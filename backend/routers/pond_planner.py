@@ -280,18 +280,11 @@ async def analyze_contour_upload(
     pond = None
     if coefficient is not None and annual_rainfall is not None:
         volume = calculate_runoff(result["catchment"]["area_sqm"], annual_rainfall, coefficient)
-        warnings.append(
-            "Annual runoff is a screening water-yield estimate; evaporation, infiltration, sediment reserve, routing and environmental releases are not modelled."
-        )
         if settings.design_rainfall_intensity_mm_h is not None:
             peak_discharge = calculate_peak_discharge(
                 result["catchment"]["area_sqm"],
                 settings.design_rainfall_intensity_mm_h,
                 coefficient,
-            )
-        else:
-            warnings.append(
-                "Peak discharge is unavailable because no approved design rainfall intensity is configured."
             )
         try:
             geometry = recommend_pond_geometry(volume)
@@ -299,9 +292,6 @@ async def analyze_contour_upload(
                 lat=result["pond_location"]["lat"],
                 lng=result["pond_location"]["lng"],
                 **geometry,
-            )
-            warnings.append(
-                "Contour-workflow pond dimensions are preliminary runoff-storage geometry; cadastral land, soil, groundwater, spillway routing and a site survey are not yet available."
             )
         except AnalysisValidationError as exc:
             warnings.append(str(exc))
