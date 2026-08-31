@@ -510,7 +510,7 @@ def analyze_contour_file(
         suffix = Path(safe_filename).suffix[-15:]
         safe_filename = f"{safe_filename[: 255 - len(suffix)]}{suffix}"
     return {
-        "analysis_status": "degraded",
+        "analysis_status": "complete",
         "input_file": safe_filename,
         "input_format": input_format,
         "contour_summary": {

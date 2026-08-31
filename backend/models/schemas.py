@@ -225,7 +225,7 @@ class WaterScreening(APIModel):
 
 
 class ContourAnalysisResponse(APIModel):
-    analysis_status: Literal["degraded", "incomplete"]
+    analysis_status: Literal["complete", "degraded", "incomplete"]
     input_file: str = Field(..., min_length=1, max_length=255)
     input_format: Literal["kml", "kmz"]
     contour_summary: ContourSummary
