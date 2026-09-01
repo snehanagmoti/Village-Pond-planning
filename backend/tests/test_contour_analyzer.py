@@ -261,6 +261,8 @@ async def test_contour_upload_api_and_assignment_alias(client):
     payload = response.json()
     assert payload["contour_summary"]["contour_count"] == 5
     assert payload["analysis_status"] == "complete"
+    assert payload["dem_visualization"]["image_data_url"].startswith("data:image/png;base64,")
+    assert payload["dem_visualization"]["maximum_elevation_m"] > payload["dem_visualization"]["minimum_elevation_m"]
     assert payload["rainfall_data"]["annual_avg_mm"] == 900.0
     assert payload["runoff_stats"]["estimated_volume_m3"] > 0
     assert payload["pond"]["capacity_m3"] > 0

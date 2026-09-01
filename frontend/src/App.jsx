@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Circle,
+  ImageOverlay,
   MapContainer,
   Marker,
   Polygon,
@@ -424,6 +425,17 @@ export default function App() {
             url={imageryTileUrl}
             attribution={imageryAttribution}
           />
+          {visibleLayers.contours && contourAnalysis?.dem_visualization?.image_data_url && (
+            <ImageOverlay
+              url={contourAnalysis.dem_visualization.image_data_url}
+              bounds={[
+                [contourAnalysis.dem_visualization.south_west.lat, contourAnalysis.dem_visualization.south_west.lng],
+                [contourAnalysis.dem_visualization.north_east.lat, contourAnalysis.dem_visualization.north_east.lng],
+              ]}
+              opacity={0.48}
+              zIndex={220}
+            />
+          )}
           <FlyTo center={flyTarget} />
           <FitEvidence points={fitPoints} panelOpen={panelOpen} />
           <MapSelection

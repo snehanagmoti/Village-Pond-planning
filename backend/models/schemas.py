@@ -174,6 +174,15 @@ class ContourGrid(APIModel):
     method: str
 
 
+class DemVisualization(APIModel):
+    image_data_url: str = Field(..., min_length=32)
+    south_west: Coordinates
+    north_east: Coordinates
+    minimum_elevation_m: float
+    maximum_elevation_m: float
+    method: str
+
+
 class ContourPondLocation(Coordinates):
     elevation_m: float
     boundary_distance_m: float = Field(..., ge=0)
@@ -230,6 +239,7 @@ class ContourAnalysisResponse(APIModel):
     input_format: Literal["kml", "kmz"]
     contour_summary: ContourSummary
     grid: ContourGrid
+    dem_visualization: DemVisualization
     pond_location: ContourPondLocation
     candidate_options: List[ContourCandidateOption] = Field(..., min_length=1, max_length=5)
     selection: ContourSelection

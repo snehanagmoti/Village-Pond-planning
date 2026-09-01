@@ -184,7 +184,7 @@ it('uploads a KML contour map and renders its derived catchment result', async (
   expect(screen.getByText((content) => content.replaceAll(',', '').includes('1058731 m³/year'))).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Use this option and recompute' })).toBeInTheDocument();
   expect(screen.getByText('Interpolated surface; field verification required.')).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: /Reconstructed elevation contours/ })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByRole('button', { name: /DEM surface \+ elevation contours/ })).toHaveAttribute('aria-pressed', 'true');
 
   await user.click(screen.getByRole('button', { name: 'Use this option and recompute' }));
   await waitFor(() => expect(api.post).toHaveBeenCalledTimes(2));

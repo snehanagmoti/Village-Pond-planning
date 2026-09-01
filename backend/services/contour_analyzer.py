@@ -7,6 +7,7 @@ passing the surface to the shared hydrology implementation.
 
 from __future__ import annotations
 
+import base64
 import math
 import re
 import statistics
@@ -33,6 +34,34 @@ _NUMBER = re.compile(r"^\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*(?:m|metres?|
 
 class ContourFileError(ValueError):
     """A safe, user-correctable contour upload error."""
+
+
+def _dem_visualization(
+    dem: np.ndarray,
+    mask: np.ndarray,
+    latitudes: np.ndarray,
+    longitudes: np.ndarray,
+) -> dict:
+    """Encode the reconstructed DEM as a transparent, map-aligned PNG overlay."""
+    valid = dem[mask]
+    minimum, maximum = float(valid.min()), float(valid.max())
+    scaled = np.clip((dem - minimum) / max(maximum - minimum, 1e-9) * 255, 0, 255).astype(np.uint8)
+    colours = cv2.applyColorMap(scaled, cv2.COLORMAP_TURBO)
+    alpha = np.where(mask, 178, 0).astype(np.uint8)
+    rgba = cv2.cvtColor(colours, cv2.COLOR_BGR2BGRA)
+    rgba[:, :, 3] = alpha
+    # Leaflet places the first image row at the northern edge; grid rows run south to north.
+    ok, encoded = cv2.imencode(".png", np.flipud(rgba))
+    if not ok:
+        raise ContourFileError("The reconstructed terrain preview could not be encoded")
+    return {
+        "image_data_url": "data:image/png;base64," + base64.b64encode(encoded).decode("ascii"),
+        "south_west": {"lat": float(latitudes[0]), "lng": float(longitudes[0])},
+        "north_east": {"lat": float(latitudes[-1]), "lng": float(longitudes[-1])},
+        "minimum_elevation_m": round(minimum, 3),
+        "maximum_elevation_m": round(maximum, 3),
+        "method": "Colour-relief rendering of the reconstructed contour DEM",
+    }
 
 
 @dataclass(frozen=True)
@@ -525,6 +554,7 @@ def analyze_contour_file(
             **grid,
             "method": "Contour rasterization with fixed-observation harmonic interpolation",
         },
+        "dem_visualization": _dem_visualization(dem, analysis_mask, latitudes, longitudes),
         "pond_location": {
             "lat": round(float(pond["lat"]), 6),
             "lng": round(float(pond["lng"]), 6),

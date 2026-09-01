@@ -38,7 +38,7 @@ export default function MapLegend({
           Catchment boundary
         </LayerToggle>
         <LayerToggle layer="contours" enabled={layers.contours} onToggle={onToggle} swatchClass="legend-line terrain">
-          Reconstructed elevation contours
+          {mode === 'contour' ? 'DEM surface + elevation contours' : 'Reconstructed elevation contours'}
         </LayerToggle>
         <LayerToggle layer="study" enabled={layers.study} onToggle={onToggle} swatchClass="legend-line study-area">
           {extentLabel}
