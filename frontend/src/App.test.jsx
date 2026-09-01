@@ -58,7 +58,7 @@ it('requires explicit confirmation after coordinates are selected', async () => 
 it('uploads a KML contour map and renders its derived catchment result', async () => {
   api.post.mockResolvedValue({
     data: {
-      analysis_status: 'degraded',
+      analysis_status: 'complete',
       input_file: 'terrain.kml',
       input_format: 'kml',
       contour_summary: {

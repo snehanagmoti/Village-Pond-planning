@@ -114,7 +114,7 @@ const hasAnalysisContract = (value) => Boolean(
 );
 const hasContourContract = (value) => Boolean(
   value
-  && ['degraded', 'incomplete'].includes(value.analysis_status)
+  && ['complete', 'degraded', 'incomplete'].includes(value.analysis_status)
   && value.contour_summary
   && value.grid
   && value.pond_location
