@@ -17,8 +17,9 @@ screening outputs, not construction designs or land-ownership determinations.
 Uploads a KML or KMZ contour map, reconstructs a gridded elevation surface,
 screens satellite water, ranks spatially separated pond alternatives, delineates
 the D8 catchment draining to the selected candidate, queries historical
-rainfall, and returns runoff plus preliminary pond geometry. The multipart field
-name is `contour_file`.
+rainfall, and returns runoff plus preliminary pond geometry. Use the
+teacher-specified multipart field `contour_map`; `contour_file` remains accepted
+for the web frontend. Both names execute the same validated pipeline.
 
 Selection fields are optional multipart form values:
 
@@ -41,7 +42,7 @@ PowerShell example:
 
 ```powershell
 curl.exe -X POST `
-  -F "contour_file=@C:\path\to\contours_1m.kml" `
+  -F "contour_map=@C:\path\to\contours_1m.kml" `
   -F "selection_mode=automatic" `
   http://127.0.0.1:8000/api/analyze-contour
 ```

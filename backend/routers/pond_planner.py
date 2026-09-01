@@ -91,9 +91,13 @@ def _unavailable_source(name: str, message: str) -> SourceMetadata:
 async def analyze_contour_upload(
     request: Request,
     contour_file: Annotated[
-        UploadFile,
-        File(description="Contour map in KML or KMZ format"),
-    ],
+        UploadFile | None,
+        File(description="Contour map in KML or KMZ format (primary field)"),
+    ] = None,
+    contour_map: Annotated[
+        UploadFile | None,
+        File(description="Assignment-compatible KML/KMZ upload field"),
+    ] = None,
     selection_mode: Annotated[str, Form()] = "automatic",
     selected_lat: Annotated[float | None, Form()] = None,
     selected_lng: Annotated[float | None, Form()] = None,
@@ -103,13 +107,26 @@ async def analyze_contour_upload(
 
     ``/api/analyzeContour`` and ``/api/findCatchment`` are compatibility aliases
     for the assignment wording; ``/api/analyze-contour`` is the documented route.
+    Upload clients may use either ``contour_file`` or the teacher-specified
+    ``contour_map`` multipart field name.
     """
+    uploaded_file = contour_file or contour_map
+    if uploaded_file is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "missing_contour_file",
+                "message": "Upload a KML/KMZ file using contour_map or contour_file",
+            },
+        )
     await limiter.enforce(request, "contour", settings.rate_contour_per_minute)
-    filename = contour_file.filename or "upload.kml"
+    filename = uploaded_file.filename or "upload.kml"
     try:
-        document = await contour_file.read(settings.contour_max_upload_bytes + 1)
+        document = await uploaded_file.read(settings.contour_max_upload_bytes + 1)
     finally:
-        await contour_file.close()
+        await uploaded_file.close()
+        if contour_file is not None and contour_map is not None and contour_map is not uploaded_file:
+            await contour_map.close()
     if len(document) > settings.contour_max_upload_bytes:
         raise HTTPException(
             status_code=413,

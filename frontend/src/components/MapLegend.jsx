@@ -62,7 +62,11 @@ export default function MapLegend({
           <span>{minimumElevation} m</span><i aria-hidden="true" /><span>{maximumElevation} m</span>
         </div>
       )}
-      {mode === 'contour' && <p className="legend-note">The orange outlet is hydrology evidence, not a pond recommendation.</p>}
+      {mode === 'contour' && (
+        <p className="legend-note">
+          The colour surface shows terrain elevation—not water. The orange outlet is hydrology evidence, not a pond recommendation.
+        </p>
+      )}
     </aside>
   );
 }

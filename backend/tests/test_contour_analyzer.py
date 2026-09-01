@@ -272,8 +272,12 @@ async def test_contour_upload_api_and_assignment_alias(client):
     assert not any("Contour-workflow pond dimensions" in note for note in payload["quality"]["warnings"])
     assert payload["water_screening"]["status"] == "applied"
 
-    alias_response = await client.post("/api/analyzeContour", files=files)
+    alias_response = await client.post(
+        "/api/analyzeContour",
+        files={"contour_map": ("terrain.kml", synthetic_kml())},
+    )
     assert alias_response.status_code == 200
+    assert alias_response.json()["analysis_status"] == "complete"
 
 
 @pytest.mark.anyio

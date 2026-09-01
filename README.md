@@ -56,6 +56,8 @@ quality limitations instead of inventing convincing fallback values.
   candidate point, catchment area and boundary, provenance, and technical notes;
 - exposes the canonical `POST /api/analyze-contour` route plus compatible
   `/api/analyzeContour` and `/api/findCatchment` aliases;
+- accepts the teacher-specified multipart field `contour_map` as well as the
+  frontend field `contour_file`;
 - provides a complete upload workflow in the React frontend and Swagger/ReDoc
   documentation in the backend.
 
