@@ -69,23 +69,52 @@ PostgreSQL history is optional and disabled by default because it stores precise
 locations. When enabled, history requires an API key, bounded queries, Alembic
 migrations, and non-default credentials.
 
-```text
-React / Leaflet
-  |-- KML/KMZ multipart --> FastAPI --> safe parser --> interpolated DEM
-  |                                              `--> D8 catchment JSON
-  `-- location + radius --> FastAPI --> elevation + rainfall + imagery
-                                                 `--> runoff + pond screen
+```mermaid
+graph TD
+    UI[React / Leaflet Client]
 
-Optional protected history -------------------------------> PostgreSQL
+    subgraph FastAPI Backend
+        API[API Router]
+        Parse[KML/KMZ Parser]
+        Terrain[Terrain Reconstruction]
+        Hydro[D8 Hydrology Pipeline]
+        Loc[Location API]
+        CV[CV Satellite Screening]
+    end
+
+    subgraph External Services
+        Meteo[Open-Meteo Rainfall/Elevation]
+        NASA[NASA POWER Fallback]
+        Sat[Satellite Imagery]
+    end
+
+    UI -- "Multipart KML Upload" --> API
+    API --> Parse
+    Parse --> Terrain
+    Terrain --> Hydro
+
+    UI -- "Location + Radius" --> Loc
+    Loc --> Meteo
+    Loc --> NASA
+    Loc --> Sat
+    Sat --> CV
+    CV --> Hydro
+
+    Hydro --> UI
+
+    DB[(Optional PostgreSQL History)]
+    API -. "Save History" .-> DB
 ```
 
 ## 4. Phase 2 contour-file analysis
 
 ### 4.1 Input and validation
 
-The canonical route is `POST /api/analyze-contour`; the multipart field name is
-`contour_file`. Hidden compatibility aliases `/api/analyzeContour` and
-`/api/findCatchment` accept the same request. The route reads at most the
+The canonical route is `POST /api/analyze-contour`. For the course evaluator,
+the required multipart field name is exactly `contour_map`; the UI-compatible
+alias `contour_file` is also accepted. Compatibility routes
+`/api/analyzeContour` and `/api/findCatchment` accept the same request. The
+route reads at most the
 configured 15 MiB plus one byte, closes the temporary upload, and runs CPU work
 in a worker thread.
 
@@ -109,11 +138,16 @@ configuration. Each contour is rasterized into fixed observed cells. Unknown
 interior cells are initialized from neighboring observations and solved by
 iterative harmonic interpolation while observed values remain fixed. The result
 records observed-cell ratio, iteration count, convergence, cell size, and method.
+It also returns a transparent elevation-colour PNG aligned to geographic bounds;
+this surface is a visualization of reconstructed terrain height, not a water or
+river layer.
 
 The study boundary masks both interpolation and later hydrology so cells outside
-the uploaded domain cannot become part of the catchment. Results are always
-labelled `degraded`, even on successful convergence, because an interpolated
-surface is not equivalent to a surveyed DEM.
+the uploaded domain cannot become part of the catchment. A successfully computed
+response has `analysis_status: complete`; its nested quality metadata remains
+`degraded` because an interpolated contour surface is not equivalent to a
+surveyed raster DEM. These fields answer different questions: completion says
+the software finished, while quality describes the strength of the evidence.
 
 ### 4.3 Hydrology and candidate selection
 
@@ -153,8 +187,10 @@ elevation is stored in the implementation.
 
 ### 4.4 Provided-map result
 
-The supplied `contours_1m.kml` was processed through release `0a385c0` of the
-deployed service on 29 August 2026. The measured automatic output was:
+The supplied `contours_1m.kml` was reprocessed through release `a1ede18` of the
+deployed service on 1 September 2026 using the teacher-required `contour_map`
+field. The request returned HTTP 200 and `analysis_status: complete`. The
+measured automatic output was:
 
 | Metric | Result |
 | --- | ---: |
@@ -179,7 +215,7 @@ deployed service on 29 August 2026. The measured automatic output was:
 | Screening runoff volume | 1,355,474.66 m3/year at C = 0.30 |
 | Preliminary pond capacity | 1,084,379.73 m3 |
 | Preliminary excavation volume | 1,224,734.67 m3 |
-| Production API time | 12.47 s, HTTP 200 |
+| Production API result | HTTP 200, complete |
 
 The three returned alternatives were:
 
@@ -205,6 +241,21 @@ that the point was rejected as inside the exclusion buffer.
 
 These figures demonstrate the working algorithm on the provided map; they are
 not a field-verified pond recommendation.
+
+### 4.5 Independent numerical reconciliation
+
+The final verification recomputed the principal outputs without using the API's
+rounded result fields. Area conversion gave
+`3,529,523.47 / 10,000 = 352.952347 ha`, which rounds to the returned
+`352.9523 ha`. Annual runoff used `V = C × A × P`, with `C = 0.30` and
+`P = 1.28013 m`, giving `1,355,474.6639 m3/year`; the response is
+`1,355,474.66 m3/year`. Applying the configured 80% capture target gives
+`1,084,379.7311 m3`, matching the returned `1,084,379.73 m3`. The three pond
+options were respectively 334.35 m, 262.63 m, and 435.54 m from the buffered
+detected-water mask, all greater than the 60 m hard exclusion; their boundary
+clearances were 467.99 m, 341.99 m, and 593.99 m, all greater than the 75 m
+analysis-boundary setback. A source scan found no production-service literal
+for the sample coordinate or output values.
 
 ## 5. Location-based elevation and hydrology
 
@@ -374,6 +425,9 @@ The final local quality matrix includes:
 | npm high-severity audit | 0 vulnerabilities |
 | Provided KML direct analysis | Passed; automatic, point, region, and synthetic-water cases |
 | Hosted KML automatic upload | HTTP 200 in 12.47 s with complete typed response |
+| Teacher multipart contract | `contour_map` upload returned HTTP 200 and complete output |
+| Independent formula reconciliation | Area, runoff, and 80% capacity matched within rounding precision |
+| Candidate safety invariants | All three options passed 60 m detected-water and 75 m boundary gates |
 | Hosted manual point selection | HTTP 200; catchment recomputed to 301.1143 ha |
 | Hosted region selection | HTTP 200; option 2 selected, 381.4633 ha |
 | Hosted KMZ upload | HTTP 200; result matched the source KML |
@@ -385,6 +439,8 @@ The final local quality matrix includes:
 | Hosted frontend and security headers | HTTP 200; frame, MIME and referrer headers passed |
 | Hosted API readiness and OpenAPI | Verified through the deployed service |
 | Hosted 2 km location analysis | 35 rainfall years; 152.07 ha selected catchment; three pond options |
+| Course machine ports 2238, 2239, 2240 | Remote HTTPS liveness returned HTTP 200 |
+| Course machine port 2235 | Login rejected before testing; machine credential/access issue, not an API response |
 
 Backend tests cover contour/KMZ safety, parsing variants, KML route behavior,
 input limits, D8 flow, accumulation, selected-point catchment traversal,
@@ -398,18 +454,25 @@ ranked options, complete output rendering, and contour-selection interactions.
 ## 13. Deployment and submission
 
 The repository contains `render.yaml` for repeatable deployment in the Singapore
-region. Release `0a385c0` was deployed and verified on 29 August 2026:
+region. Release `a1ede18` was deployed and verified on 1 September 2026:
 
 - Frontend: https://sneha-village-pond-planning-2026.onrender.com
 - API: https://sneha-village-pond-api-2026.onrender.com
 - API documentation: https://sneha-village-pond-api-2026.onrender.com/docs
 
 Free Render web services can sleep after inactivity, so the first API request
-may require a cold-start wait. The final hosted KML verification processed all
-1,355 contours and 159,113 source vertices in 12.47 seconds, returned three
+may require a cold-start wait. The final hosted KML verification used the exact
+`contour_map` field, processed all 1,355 contours and 159,113 source vertices,
+returned HTTP 200 with a complete status and three
 ranked and water-screened alternatives, and completed the rainfall, runoff, and
 pond-geometry branches. Point and region re-selection, KMZ upload, and negative
 selection rejection were then exercised against the same deployed release.
+
+Remote HTTPS liveness was also tested from the supplied course development
+machines. Ports 2238, 2239, and 2240 each returned HTTP 200. Port 2235 rejected
+the supplied SSH login before the remote request could run; therefore its result
+is recorded as unverified rather than falsely reported as an API failure or pass.
+No machine password is stored in this repository or report.
 
 The final hosted location test also exercised the complete fallback rainfall and
 pond paths: 35 complete rainfall years, 1,324.2 mm mean annual rainfall, a

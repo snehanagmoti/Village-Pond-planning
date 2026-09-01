@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Iterable
 
 from docx import Document
-from docx.enum.section import WD_SECTION
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
@@ -520,8 +519,8 @@ def add_cover(doc: Document) -> None:
     metadata = [
         ("Student", "Sneha Nagmoti"),
         ("Course deliverable", "Assignment 1 - Phase 3 final implementation"),
-        ("Verified release", "0a385c0"),
-        ("Verification date", "29 August 2026"),
+        ("Verified release", "a1ede18"),
+        ("Verification date", "1 September 2026"),
         ("Frontend", "sneha-village-pond-planning-2026.onrender.com"),
         ("Repository", "github.com/snehanagmoti/Village-Pond-planning"),
     ]
@@ -538,7 +537,7 @@ def add_document_control(doc: Document) -> None:
         ["Item", "Verified state"],
         [
             ("Scope", "Code, algorithms, UI, tests, deployment, and documentation"),
-            ("Functional release", "0a385c0 deployed on both Render services"),
+            ("Functional release", "a1ede18 deployed on both Render services"),
             ("Backend verification", "68 tests passed; 88.79% statement coverage; Ruff passed"),
             ("Frontend verification", "11 tests passed; Oxlint passed; Vite production build passed"),
             ("Production contour verification", "KML, KMZ, automatic, point, region, and invalid-point cases exercised"),
@@ -770,7 +769,7 @@ def add_appendices(doc: Document, bullet_id: int, number_id: int, decimal_abstra
     add_heading(doc, "Appendix C. Complete output dictionary", 1, "appendix_outputs", bookmark, page_break=True)
     bookmark += 1
     output_rows = [
-        ("analysis_status", "reliable / degraded / incomplete", "Overall evidence status; contour interpolation remains degraded by design"),
+        ("analysis_status", "complete / degraded / incomplete", "Whether computation finished; nested quality metadata separately reports evidence limitations"),
         ("contour_summary", "counts, range, interval", "What the KML/KMZ contained and whether it had sufficient terrain evidence"),
         ("grid", "rows, columns, cell size, convergence", "Quality and resolution of the reconstructed surface"),
         ("pond_location", "coordinate, elevation, slope, score", "The selected eligible grid cell and how it was chosen"),
@@ -810,10 +809,10 @@ def add_appendices(doc: Document, bullet_id: int, number_id: int, decimal_abstra
     bookmark += 1
     add_heading(doc, "D.1 Automatic contour analysis", 2, "appendix_api_auto", bookmark)
     bookmark += 1
-    add_code(doc, "curl.exe -X POST ^\n  -F \"contour_file=@C:\\path\\contours_1m.kml\" ^\n  -F \"selection_mode=automatic\" ^\n  https://sneha-village-pond-api-2026.onrender.com/api/analyze-contour")
+    add_code(doc, "curl.exe -X POST ^\n  -F \"contour_map=@C:\\path\\contours_1m.kml\" ^\n  -F \"selection_mode=automatic\" ^\n  https://sneha-village-pond-api-2026.onrender.com/api/analyze-contour")
     add_heading(doc, "D.2 Manual point", 2, "appendix_api_point", bookmark)
     bookmark += 1
-    add_code(doc, "curl.exe -X POST ^\n  -F \"contour_file=@C:\\path\\contours_1m.kml\" ^\n  -F \"selection_mode=point\" ^\n  -F \"selected_lat=21.245156\" ^\n  -F \"selected_lng=81.289215\" ^\n  https://sneha-village-pond-api-2026.onrender.com/api/analyze-contour")
+    add_code(doc, "curl.exe -X POST ^\n  -F \"contour_map=@C:\\path\\contours_1m.kml\" ^\n  -F \"selection_mode=point\" ^\n  -F \"selected_lat=21.245156\" ^\n  -F \"selected_lng=81.289215\" ^\n  https://sneha-village-pond-api-2026.onrender.com/api/analyze-contour")
     add_heading(doc, "D.3 Region-constrained search", 2, "appendix_api_region", bookmark)
     bookmark += 1
     add_code(doc, "selected_region=[\n  {\"lat\":21.2424,\"lng\":81.2864},\n  {\"lat\":21.2434,\"lng\":81.2864},\n  {\"lat\":21.2434,\"lng\":81.2875},\n  {\"lat\":21.2424,\"lng\":81.2875}\n]")
