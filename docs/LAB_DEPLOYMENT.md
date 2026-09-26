@@ -27,6 +27,8 @@ Successful satellite tiles are retained in a bounded TTL cache to help retries r
 
 ## Health, logs and recovery
 
+Convenience recovery after SSH login: `sh "$HOME/pond-phase3-release/start_lab_service.sh"`. It starts the existing service if needed and checks readiness without stopping an already-running app.
+
 Run after SSH login:
 
 ```sh

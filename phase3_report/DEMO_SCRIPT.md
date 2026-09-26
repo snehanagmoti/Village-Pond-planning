@@ -6,7 +6,7 @@
 
 ## 0:25-1:30 - Live land-area analysis
 
-1. Open `https://sneha-village-pond-planning-2026.onrender.com/`.
+1. Open `http://10.1.75.53:3238/` while connected to the college network.
 2. Select **Live analysis**.
 3. Enter `21.244025, 81.288000` or click the same area on the map.
 4. Keep the default radius and click **Start screening analysis**.
@@ -26,7 +26,7 @@ Show the result cards and read the units:
 - water depth and dimensions; and
 - source-quality and technical notes.
 
-Select option 2 and then option 1 again to show that the catchment and pond geometry are tied to the chosen candidate.
+Collapse the panel and show the on-map catchment, annual runoff and storage summary. Explain that annual inflow and the pond's physical storage are different quantities. Live alternative markers are informational; use the contour workflow below to demonstrate candidate recomputation.
 
 ## 2:20-3:20 - Contour upload
 
@@ -40,12 +40,16 @@ Narration: “The KML lines are rasterized onto a metric grid. Observed contour 
 
 ## 3:20-4:05 - API and validation
 
-Open `https://sneha-village-pond-api-2026.onrender.com/docs`. Show `POST /api/analyze-contour`, noting that the assignment-compatible multipart field is `contour_map`, and show `POST /api/analyze` for live analysis.
+Open `http://10.1.75.53:3238/docs`. Show `POST /api/analyze-contour`, noting that the assignment-compatible multipart field is `contour_map`, and show `POST /api/analyze` for live analysis.
 
-Narration: “The API returns structured JSON, source status, quality warnings and map geometry. Invalid files, oversized archives, unsupported radii and unavailable sources are handled explicitly. The final backend suite has 68 passing tests; the frontend has 11 passing tests, and lint and production build succeed.”
+Narration: “The API returns structured JSON, source status, quality warnings and map geometry. Invalid files, oversized archives, unsupported radii and unavailable sources are handled explicitly. The final local backend suite has 76 passing tests; the frontend has 13 passing tests, and lint and production build succeed.”
 
 ## 4:05-4:30 - CSD design and conclusion
 
 “The implementation is a modular monolith with typed REST contracts, asynchronous source calls, bounded caching, rate limits and graceful fallbacks. The analysis is stateless when optional history is disabled, so replicas can be run on the allotted systems. The final output provides the required suggested pond location, catchment area and expected water volume, all visualized on the map.”
 
 Stop recording before 5:00. Upload as **Public** or **Unlisted only if the assignment accepts Unlisted**; otherwise choose Public. Verify the link in an incognito window before submission.
+
+## Before recording
+
+Run both workflows once to confirm source availability. Keep the supplied KML ready. Cold external-data requests can take over a minute: explain the algorithm while waiting, or disclose a time-compressed waiting segment. Never present an incomplete run as a complete recommendation. Show the actual current output rather than insisting the example numbers above must match every data-source resolution.

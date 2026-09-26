@@ -181,7 +181,7 @@ it('uploads a KML contour map and renders its derived catchment result', async (
   expect(screen.queryByText('Limitations and warnings')).not.toBeInTheDocument();
   expect(screen.getByText('392.1225 ha')).toBeInTheDocument();
   expect(screen.getByText('Estimated runoff volume')).toBeInTheDocument();
-  expect(screen.getByText((content) => content.replaceAll(',', '').includes('1058731 m³/year'))).toBeInTheDocument();
+  expect(screen.getAllByText((content) => content.replaceAll(',', '').includes('1058731 m³/year')).length).toBeGreaterThan(0);
   expect(screen.getByRole('button', { name: 'Use this option and recompute' })).toBeInTheDocument();
   expect(screen.getByText('Interpolated surface; field verification required.')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: /DEM surface \+ elevation contours/ })).toHaveAttribute('aria-pressed', 'true');

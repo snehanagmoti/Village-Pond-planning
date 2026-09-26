@@ -18,6 +18,7 @@ import L from 'leaflet';
 import { api, apiErrorMessage } from './api';
 import SearchBar from './components/SearchBar';
 import MapLegend from './components/MapLegend';
+import MapResultSummary from './components/MapResultSummary';
 import RainfallChart from './components/RainfallChart';
 import iconUrl from 'leaflet/dist/images/marker-icon.png';
 import iconShadow from 'leaflet/dist/images/marker-shadow.png';
@@ -530,6 +531,8 @@ export default function App() {
               <Popup>
                 <strong>Screening candidate only</strong><br />
                 Water depth: {analysis.pond.water_depth_m} m<br />
+                Catchment: {numberOrDash(analysis.runoff_stats?.catchment_area_sqm / 10000, 2)} ha<br />
+                Expected annual runoff: {numberOrDash(analysis.runoff_stats?.estimated_volume_m3, 0)} m³/year<br />
                 Capacity: {numberOrDash(analysis.pond.capacity_m3, 0)} m³
               </Popup>
             </Marker>
@@ -561,10 +564,12 @@ export default function App() {
                 Contributing area: {numberOrDash(option.contributing_area_hectares, 2)} ha<br />
                 Local slope: {numberOrDash(option.local_slope_percent, 1)}%<br />
                 Water clearance: {option.water_distance_m == null ? 'Not available' : `${numberOrDash(option.water_distance_m, 0)} m`}
+                {option.selected && <><br />Expected annual runoff: {numberOrDash(contourAnalysis.runoff_stats?.estimated_volume_m3, 0)} m³/year<br />Storage capacity: {numberOrDash(contourAnalysis.pond?.capacity_m3, 0)} m³</>}
               </Popup>
             </Marker>
           ))}
         </MapContainer>
+        <MapResultSummary result={contourAnalysis || analysis} contour={Boolean(contourAnalysis)} />
         {(analysis || contourAnalysis) && (
           <MapLegend
             mode={contourAnalysis ? 'contour' : 'location'}

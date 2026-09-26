@@ -2,22 +2,22 @@
 
 ## Ready
 
-- Final report: `output/pdf/Phase_3_Final_Technical_Report.pdf` (8 pages, supplied template, visually verified).
+- Final report: `output/pdf/Phase_3_Final_Technical_Report.pdf` (9 pages, supplied template, college deployment and measured results included).
 - GitHub: `https://github.com/snehanagmoti/Village-Pond-planning`.
-- Frontend: `https://sneha-village-pond-planning-2026.onrender.com/`.
-- Backend: `https://sneha-village-pond-api-2026.onrender.com`.
-- Swagger: `https://sneha-village-pond-api-2026.onrender.com/docs`.
-- Backend tests: 72 passed locally and on system 2 (11.74 seconds remotely), including combined frontend/API routes and imagery-cache recovery.
-- Frontend tests: 11 passed across five files.
+- Frontend: `http://10.1.75.53:3238/` (college network).
+- Backend upload: `POST http://10.1.75.53:3238/api/analyze-contour`, field `contour_map`.
+- Swagger: `http://10.1.75.53:3238/docs`.
+- Backend tests: 76 passed locally and on system 2 (14.14 seconds remotely), including independent hydrology reference checks.
+- Frontend tests: 13 passed across six files.
 - Frontend lint and production build: passed.
 - Live and contour workflows: verified with mapped pond options, catchment and volume.
+- Two concurrent sample-contour requests completed; 15 health checks passed while they ran. See `DEV_MACHINE_VERIFICATION.md` for exact timings and resource limits.
 
 ## Must be completed before pressing “Mark as done”
 
 - Record the maximum-five-minute demo using `DEMO_SCRIPT.md`.
 - Upload it to YouTube and verify the public URL while signed out.
 - Add the PDF, GitHub URL, frontend URL and YouTube URL to the Classroom submission.
-- Refresh the final report PDF with the verified college deployment URLs and latest measured timings; the current PDF predates that deployment.
 - Check the college frontend `http://10.1.75.53:3238/` immediately before the demo. Intermittent network connection timeouts were observed.
 - Recheck live-source availability before the demo: after the imagery-cache recovery fix, browser analysis completed with three pond options, but an earlier upstream outage correctly produced an incomplete result.
 - Open every submitted link once from an incognito/private window.

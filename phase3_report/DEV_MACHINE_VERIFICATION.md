@@ -60,4 +60,15 @@ An imagery recovery improvement was subsequently deployed: valid image tiles are
 
 **Post-fix browser verification succeeded:** at 21.244025, 81.288000 with a 2 km radius, the interface reported analysis complete with public-data constraints, imagery ready and three ranked pond options. The selected catchment was 119.01 ha, annual rainfall 1,324.2 mm, runoff 472,758 cubic metres/year and proposed capacity 378,206 cubic metres. Pond markers and the catchment appeared on the map, and the side panel was collapsed to inspect them. Elevation used the Terrarium fallback and the UI retains its source limitations. The successful retry does not erase the earlier observed network/source outage.
 
-The existing report PDF predates this combined deployment; its deployment URLs and measured timings must be refreshed before final submission. A public demo video is also still required.
+## Final submission pass
+
+- Expanded final backend suite: **76 passed locally (7.24 s) and on system 2 (14.14 s)**. Four new independent path-walk checks compare every cell's flow accumulation and the selected upstream catchment to a separate reference implementation.
+- Frontend: **13 tests passed across six files**, lint passed, production build passed (1.45 s).
+- Map requirement closed: annual runoff, catchment area, pond coordinates and storage capacity are now available in an on-map summary; selected markers also expose water-volume details. The final deployed live workflow and collapsed-panel summary were checked in the browser.
+- Real bounded concurrency: two simultaneous sample KML uploads returned complete status in **41.38 s and 59.05 s**. Both returned catchment 3,529,523.47 square metres, annual runoff 1,355,474.66 cubic metres and three candidates. Independent runoff multiplication and capacity bounds passed.
+- All **15 simultaneous readiness probes** succeeded; maximum latency **0.271 s**. This is a small-workload check, not sustained saturation testing.
+- Container limits: **512 MiB RAM and one CPU quota**, read from cgroup limits (the host-wide `free` output is not the container allocation).
+- Actual sample point/region API checks passed: the warmed automatic request completed in 2.02 s; selecting the last returned candidate recomputed a **3,011,142.94 m²** catchment, while restricting the search to the supplied study boundary returned **3,529,523.47 m²**. Both returned complete status and the requested selection mode. The point coordinates were checked against the requested candidate.
+- Recovery helper: `scripts/start_lab_service.sh`, deployed to `~/pond-phase3-release/`, contains no credentials. Container restart remains distinct from an application restart.
+
+The final report has been refreshed with this deployment evidence and the on-map result screenshot, retaining the required ACM template. The user must still record/publish the required public demo video and perform the final Classroom submission. No field-survey reference data was supplied, so physical accuracy for all sites is not claimed.
