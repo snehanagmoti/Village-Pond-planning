@@ -17,6 +17,8 @@ from services.quality import SourceInfo, UpstreamDataError
 logger = logging.getLogger(__name__)
 settings = get_settings()
 _cache: TTLCache["SatelliteMosaic"] = TTLCache(maxsize=32, ttl_seconds=settings.cache_ttl_seconds)
+# Preserve valid tiles across partial upstream failures without caching a partial mosaic.
+_tile_cache: TTLCache[np.ndarray] = TTLCache(maxsize=128, ttl_seconds=settings.cache_ttl_seconds)
 
 
 @dataclass
@@ -78,6 +80,10 @@ def _choose_zoom(radius_km: float) -> int:
 
 
 async def _download_tile(semaphore: asyncio.Semaphore, x: int, y: int, zoom: int):
+    cache_key = (settings.imagery_tile_url, zoom, x, y)
+    cached = _tile_cache.get(cache_key)
+    if cached is not None:
+        return x, y, cached
     async with semaphore:
         response = await get_with_retries(
             settings.imagery_tile_url.format(z=zoom, y=y, x=x),
@@ -91,6 +97,7 @@ async def _download_tile(semaphore: asyncio.Semaphore, x: int, y: int, zoom: int
     image = cv2.imdecode(np.frombuffer(response.content, np.uint8), cv2.IMREAD_COLOR)
     if image is None or image.shape[0] < 128 or image.shape[1] < 128:
         return x, y, None
+    _tile_cache.set(cache_key, image)
     return x, y, image
 
 
@@ -120,8 +127,11 @@ async def download_satellite_mosaic(lat: float, lng: float, radius_km: float) ->
         _download_tile(semaphore, x, y, zoom)
         for y in range(y_min, y_max + 1)
         for x in range(x_min, x_max + 1)
-    ])
-    tiles = {(x, y): image for x, y, image in downloads if image is not None}
+    ], return_exceptions=True)
+    tiles = {
+        (item[0], item[1]): item[2] for item in downloads
+        if not isinstance(item, BaseException) and item[2] is not None
+    }
     coverage = len(tiles) / tile_count
     if coverage < 1.0:
         raise UpstreamDataError("satellite_imagery", f"Imagery coverage is insufficient ({coverage * 100:.1f}%)")

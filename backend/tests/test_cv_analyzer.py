@@ -1,4 +1,6 @@
 import cv2
+import asyncio
+import httpx
 import numpy as np
 import pytest
 
@@ -72,3 +74,38 @@ async def test_mosaic_download_crops_to_requested_study_bounds(monkeypatch):
 def test_study_area_crossing_antimeridian_is_rejected():
     with pytest.raises(UpstreamDataError):
         cv_analyzer._study_bounds(0.0, 179.999, 5.0)
+
+
+@pytest.mark.anyio
+async def test_valid_tiles_cached_but_failures_retried(monkeypatch):
+    calls = []
+    encoded = cv2.imencode(".png", np.full((256, 256, 3), 120, np.uint8))[1].tobytes()
+
+    async def fetch(url, **kwargs):
+        calls.append(url)
+        if len(calls) == 1:
+            raise httpx.ConnectTimeout("temporary upstream failure")
+        return httpx.Response(200, content=encoded, headers={"content-type": "image/png"})
+
+    monkeypatch.setattr(cv_analyzer, "get_with_retries", fetch)
+    monkeypatch.setattr(cv_analyzer, "_tile_cache", cv_analyzer.TTLCache(maxsize=4))
+    semaphore = asyncio.Semaphore(1)
+    with pytest.raises(httpx.ConnectTimeout):
+        await cv_analyzer._download_tile(semaphore, 1, 2, 14)
+    _, _, downloaded = await cv_analyzer._download_tile(semaphore, 1, 2, 14)
+    downloaded[:] = 0
+    _, _, cached = await cv_analyzer._download_tile(semaphore, 1, 2, 14)
+    assert len(calls) == 2
+    assert np.all(cached == 120)  # Caller mutation cannot corrupt cached evidence.
+
+
+@pytest.mark.anyio
+async def test_partial_tile_failure_never_becomes_complete_mosaic(monkeypatch):
+    async def tile(_, x, y, zoom):
+        raise httpx.ConnectTimeout("unavailable tile")
+
+    monkeypatch.setattr(cv_analyzer, "_cache", cv_analyzer.TTLCache())
+    monkeypatch.setattr(cv_analyzer, "_download_tile", tile)
+    with pytest.raises(UpstreamDataError, match="coverage is insufficient"):
+        await cv_analyzer.download_satellite_mosaic(18.5, 73.8, 0.5)
+    assert not cv_analyzer._cache._items
