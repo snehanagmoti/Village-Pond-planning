@@ -104,7 +104,7 @@ def save(image: Image.Image, name: str) -> None:
 
 def architecture_diagram() -> None:
     image, draw = canvas(
-        "JalDrishti system architecture",
+        "Village pond planning system architecture",
         "A thin web client calls one validated API; independent services produce traceable screening evidence.",
     )
     box(draw, (55, 210, 340, 365), "React + Leaflet", "Responsive analysis panel\nInteractive satellite map\nResult layers and warnings", fill=MINT)
@@ -112,7 +112,7 @@ def architecture_diagram() -> None:
     box(draw, (850, 210, 1130, 365), "Contour services", "KML/KMZ safety\nGrid reconstruction\nD8 catchment", fill=MINT)
     box(draw, (1210, 210, 1535, 365), "Live-source services", "Elevation + imagery\nRainfall climatology\nSurface screening", fill=MINT)
     box(draw, (440, 570, 750, 735), "Shared science core", "Priority-Flood + D8\nCandidate ranking\nRunoff + pond geometry", fill="#E9F6FB", edge=CYAN)
-    box(draw, (850, 570, 1160, 735), "Optional history", "PostgreSQL + Alembic\nDisabled by default\nAPI-key protected", fill="#F4F4F4", edge=MUTED)
+    box(draw, (850, 570, 1160, 735), "Optional history", "SQLite summary store\nDisabled by default\nAccess protected", fill="#F4F4F4", edge=MUTED)
     box(draw, (1230, 570, 1535, 735), "External providers", "Open-Meteo / NASA POWER\nEsri imagery / OSM search", fill="#FFF7DE", edge=GOLD)
     arrow(draw, (340, 285), (440, 285), label="HTTPS")
     arrow(draw, (750, 270), (850, 270))
