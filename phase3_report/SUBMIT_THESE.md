@@ -3,7 +3,7 @@
 1. **Final report:** `output/pdf/Phase_3_Final_Technical_Report.pdf`.
 2. **GitHub:** https://github.com/snehanagmoti/Village-Pond-planning
 3. **Working frontend:** http://10.1.75.53:3238/
-4. **Public YouTube demo:** finish the voice-over and final edit of the existing demo, keep it at most five minutes, upload publicly, and paste the resulting URL. No video has been uploaded on your behalf.
+4. **Public YouTube demo:** https://youtu.be/Kt8YKtDSnM0
 
 Extra reference for the evaluator:
 
@@ -27,5 +27,5 @@ The service survives SSH logout and automatically recovers an application-proces
 ## Final user actions
 
 - Review the report and rehearse the algorithm explanation.
-- Finish the voice-over/edit and publicly upload the demo, verify the link signed out, and add it with the other three items.
-- Upload the final report and submit the Classroom assignment yourself. No Classroom submission or YouTube publication has been performed automatically.
+- Verify the YouTube link while signed out and add it with the other three items.
+- Upload the final report and submit the Classroom assignment yourself. No Classroom submission has been performed automatically.

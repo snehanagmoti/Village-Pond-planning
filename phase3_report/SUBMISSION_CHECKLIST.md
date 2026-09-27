@@ -15,8 +15,8 @@
 
 ## Must be completed before pressing “Mark as done”
 
-- Finish the user's voice-over and final edit of the existing maximum-five-minute demo using the reading script.
-- Upload it to YouTube and verify the public URL while signed out.
+- Final human-voice demo uploaded: `https://youtu.be/Kt8YKtDSnM0`.
+- Verify the public YouTube URL while signed out.
 - Add the PDF, GitHub URL, frontend URL and YouTube URL to the Classroom submission.
 - Check the college frontend `http://10.1.75.53:3238/` immediately before the demo. Intermittent network connection timeouts were observed.
 - Recheck live-source availability before the demo: the latest 27 September run and retry could not produce a pond recommendation because imagery was unavailable. Do not treat the earlier successful result as a current pass.

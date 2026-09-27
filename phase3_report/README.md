@@ -2,7 +2,7 @@
 
 Final PDF: `../output/pdf/Phase_3_Final_Technical_Report.pdf`.
 
-The report retains the supplied `acmart` manuscript/screen/review class and includes every mandatory section identified in the assignment template. It is 9 pages including references and appendix. The class and bibliography style are copied from the provided template; figures are local PNGs.
+The report retains the supplied `acmart` manuscript/screen/review class and includes every mandatory section identified in the assignment template. It is 9 pages including references. The class and bibliography style are copied from the provided template; figures are local PNGs.
 
 Compile with a working LaTeX environment, or Tectonic:
 
