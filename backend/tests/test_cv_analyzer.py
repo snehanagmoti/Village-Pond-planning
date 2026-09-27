@@ -1,5 +1,6 @@
-import cv2
 import asyncio
+
+import cv2
 import httpx
 import numpy as np
 import pytest

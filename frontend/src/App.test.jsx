@@ -186,12 +186,37 @@ it('uploads a KML contour map and renders its derived catchment result', async (
   expect(screen.getByText('Interpolated surface; field verification required.')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: /DEM surface \+ elevation contours/ })).toHaveAttribute('aria-pressed', 'true');
 
+  api.post.mockRejectedValueOnce(new Error('Temporary connection failure'));
   await user.click(screen.getByRole('button', { name: 'Use this option and recompute' }));
   await waitFor(() => expect(api.post).toHaveBeenCalledTimes(2));
   const manualBody = api.post.mock.calls[1][1];
   expect(manualBody.get('selection_mode')).toBe('point');
   expect(manualBody.get('selected_lat')).toBe('21.241');
   expect(manualBody.get('selected_lng')).toBe('81.288');
+  await user.click(await screen.findByRole('button', { name: 'Try again' }));
+  await waitFor(() => expect(api.post).toHaveBeenCalledTimes(3));
+  const [retryPath, retryBody] = api.post.mock.calls[2];
+  expect(retryPath).toBe('/analyze-contour');
+  expect(retryBody.get('selection_mode')).toBe('point');
+  expect(retryBody.get('selected_lat')).toBe(manualBody.get('selected_lat'));
+  expect(retryBody.get('selected_lng')).toBe(manualBody.get('selected_lng'));
+});
+
+it('retries a failed contour upload even when a live location was previously selected', async () => {
+  api.post.mockRejectedValue(new Error('Temporary connection failure'));
+  const user = userEvent.setup();
+  render(<App />);
+  await user.type(screen.getByRole('spinbutton', { name: 'Latitude' }), '21.244025');
+  await user.type(screen.getByRole('spinbutton', { name: 'Longitude' }), '81.288');
+  await user.click(screen.getByRole('button', { name: 'Select coordinates' }));
+  await user.click(screen.getByRole('tab', { name: 'Contour upload' }));
+  const file = new File(['<kml />'], 'terrain.kml', { type: 'application/vnd.google-earth.kml+xml' });
+  await user.upload(screen.getByLabelText('Contour file'), file);
+  await user.click(screen.getByRole('button', { name: 'Analyze contour map' }));
+  await user.click(await screen.findByRole('button', { name: 'Try again' }));
+  await waitFor(() => expect(api.post).toHaveBeenCalledTimes(2));
+  expect(api.post.mock.calls.map(call => call[0])).toEqual(['/analyze-contour', '/analyze-contour']);
+  expect(api.post.mock.calls[1][1].get('contour_file')).toBe(file);
 });
 
 

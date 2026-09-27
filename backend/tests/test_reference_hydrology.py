@@ -1,7 +1,14 @@
 """Independent graph-walk oracle; not a substitute for surveyed field validation."""
+
 import numpy as np
 import pytest
-from services.terrain import d8_flow_direction, fill_depressions, flow_accumulation, delineate_catchment
+
+from services.terrain import (
+    d8_flow_direction,
+    delineate_catchment,
+    fill_depressions,
+    flow_accumulation,
+)
 
 
 @pytest.mark.parametrize('seed', [3, 17, 42, 81])

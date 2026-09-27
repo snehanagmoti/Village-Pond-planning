@@ -7,19 +7,19 @@
 - Frontend: `http://10.1.75.53:3238/` (college network).
 - Backend upload: `POST http://10.1.75.53:3238/api/analyze-contour`, field `contour_map`.
 - Swagger: `http://10.1.75.53:3238/docs`.
-- Backend tests: 76 passed locally and on system 2 (14.14 seconds remotely), including independent hydrology reference checks.
-- Frontend tests: 13 passed across six files.
+- Backend tests: 76 passed locally and on system 2 (33.84 seconds remotely in the 27 September recheck), including independent hydrology reference checks.
+- Frontend tests: 14 passed across six files; selection-preserving retry fix deployed.
 - Frontend lint and production build: passed.
-- Live and contour workflows: verified with mapped pond options, catchment and volume.
+- Contour workflow: KML/KMZ, point and region API checks passed; fresh manual desktop/mobile results and screenshots included. Live workflow has earlier successful evidence, but the latest run and retry were incomplete because satellite imagery was unavailable.
 - Two concurrent sample-contour requests completed; 15 health checks passed while they ran. See `DEV_MACHINE_VERIFICATION.md` for exact timings and resource limits.
 
 ## Must be completed before pressing “Mark as done”
 
-- Record the maximum-five-minute demo using `DEMO_SCRIPT.md`.
+- Finish the user's voice-over and final edit of the existing maximum-five-minute demo using the reading script.
 - Upload it to YouTube and verify the public URL while signed out.
 - Add the PDF, GitHub URL, frontend URL and YouTube URL to the Classroom submission.
 - Check the college frontend `http://10.1.75.53:3238/` immediately before the demo. Intermittent network connection timeouts were observed.
-- Recheck live-source availability before the demo: after the imagery-cache recovery fix, browser analysis completed with three pond options, but an earlier upstream outage correctly produced an incomplete result.
+- Recheck live-source availability before the demo: the latest 27 September run and retry could not produce a pond recommendation because imagery was unavailable. Do not treat the earlier successful result as a current pass.
 - Open every submitted link once from an incognito/private window.
 
 ## Allotted systems

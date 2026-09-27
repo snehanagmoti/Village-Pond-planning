@@ -175,8 +175,8 @@ The deployed live workflow was manually verified at 21.244025$^\circ$N, 81.28800
 
 \begin{figure}[h]
   \centering
-  \includegraphics[width=0.98\linewidth]{contour-results.png}
-  \caption{Uploaded-contour DEM, catchment, drainage path and three ranked pond options.}
+  \includegraphics[width=0.98\linewidth]{contour-final-desktop.png}
+  \caption{Fresh allotted-system contour result: coloured DEM, catchment, drainage path and three ranked options, with 352.95 ha catchment, 1,355,475 m$^3$/year runoff and 1,084,380 m$^3$ storage displayed on the map.}
   \label{fig:results}
   \Description{A coloured interpolated elevation surface on satellite imagery with contour lines, a catchment boundary, drainage path and three ranked candidate markers.}
 \end{figure}
@@ -184,13 +184,17 @@ The deployed live workflow was manually verified at 21.244025$^\circ$N, 81.28800
 \subsection{Performance and Verification}
 \begin{figure}[h]
   \centering
-  \includegraphics[width=0.32\linewidth]{college-map-results.png}
-  \caption{Final allotted-system frontend: pond options and catchment with annual runoff and storage capacity directly on the map. The side panel is collapsed.}
-  \Description{A mobile-width satellite map with three candidate sites, a catchment boundary, and a numerical card displaying catchment area, annual runoff, storage capacity and pond coordinates.}
+  \includegraphics[width=0.68\linewidth]{region-final-desktop.png}\hfill
+  \includegraphics[width=0.27\linewidth]{region-final-mobile.png}
+  \caption{User-drawn search region after recomputation, shown at desktop and mobile widths. The changed site has 240.69 ha catchment, 924,346 m$^3$/year runoff and 739,477 m$^3$ proposed storage. The dashed search polygon restricts pond placement, not the full upstream catchment.}
+  \Description{Desktop and mobile screenshots of the same selected-region analysis, showing the search polygon, three candidate markers, catchment boundary and numerical map summary.}
 \end{figure}
-The final backend suite passes 76 tests locally (7.24 s) and on the allotted system (14.14 s), including four independent reference-walk checks of flow accumulation and upstream catchment membership. The frontend passes 13 tests across six files; lint and production build succeed. The 118-module production bundle builds in 1.45 s, with main JavaScript and CSS assets of 447.69 kB and 41.94 kB before transfer compression. A full supplied-contour request through the college HTTP endpoint returned complete status in 31.58 s. A cold live-source request encountered unavailable imagery and correctly withheld a pond recommendation; a subsequent verified run completed with three candidates. Tests cover Priority-Flood/D8 behavior, point/region selection, water exclusion, contour parsing, upload limits, source failures, runoff/geometry constraints, map-result presentation and browser-facing routing. These are functional and numerical-consistency checks, not validation against a surveyed reference watershed.
+Tests cover Priority-Flood/D8 behavior, independent reference-walk checks of flow accumulation and catchment membership, point/region selection, water exclusion, contour parsing, upload limits, source failures, runoff/geometry constraints and map-result presentation. In the 26 September baseline, a full supplied-contour request through the college HTTP endpoint completed in 31.58 s. A cold live request lacked imagery and withheld a recommendation; a subsequent run completed with three candidates. These are functional and numerical-consistency checks, not validation against a surveyed watershed.
 
 On the allotted container's 512 MiB memory and one-CPU quota, two simultaneous supplied-KML requests completed successfully in 41.38 s and 59.05 s. Both produced the same 3,529,523.47 m$^2$ catchment and 1,355,474.66 m$^3$/year runoff; an independent multiplication of area, rainfall and coefficient agreed with the reported volume. All 15 concurrent readiness probes succeeded, with a maximum response time of 0.271 s. This bounded concurrency test supports a small demonstration workload; it is not a sustained saturation benchmark or a high-availability claim.
+
+\paragraph{Repeated submission checks (27 September 2026).}
+All 76 backend tests passed again locally (24.10 s) and on system 2 (33.84 s). All 14 frontend tests, both linters and the production build passed. Manual testing exposed a retry-selection bug: failed candidate requests could revert to the preceding selection. The fix preserves the requested mode and point, and routes retries by workflow; regression checks cover both cases. The real API accepted equivalent KML/KMZ, recomputed a point and region, and returned HTTP 422 for malformed files, wrong upload fields, invalid latitude and out-of-coverage points. Browser checks covered coordinate validation, upload, layer/panel toggles, a four-vertex region with changed results and a 390-pixel layout without horizontal overflow. Connection failures required retries. A live run lacked imagery; a later contour run applied the 60 m water buffer. Failed attempts are not complete passes, and earlier live results do not guarantee upstream availability.
 
 \subsection{Allotted-System Deployment and Recovery}
 The frontend and API run together on allotted system 2, accessed through SSH port 2238. External HTTP port 3238 forwards to its internal port 3000. The frontend uses relative \texttt{/api} requests, so the demonstration does not depend on the Render backend. User-owned Supervisor restarts an exited application process; this recovery was verified. A container reboot requires the documented start command because the container's initial process is SSH rather than a service manager. Successful satellite tiles are cached with a bounded lifetime, allowing missing-tile retries without accepting partial imagery. Intermittent college-network and upstream connection failures remain possible; source failures are shown explicitly.

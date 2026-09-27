@@ -316,6 +316,10 @@ export default function App() {
       setError('Draw a search region with at least three map vertices before evaluating it.');
       return;
     }
+    // Preserve an explicit candidate override so retry repeats the failed selection.
+    setContourSelectionMode(requestedMode);
+    setContourPoint(requestedPoint);
+    setContourRegion(requestedRegion);
     const body = new FormData();
     body.append('contour_file', contourFile);
     body.append('selection_mode', requestedMode);
@@ -721,7 +725,7 @@ export default function App() {
               : 'Checking source coverage and computing the watershed…'}</span>
           </div>
         )}
-        {error && <div className="error-box" role="alert"><p>{error}</p><button className="text-btn" type="button" onClick={contourFile && !position ? runContourAnalysis : runAnalysis}>Try again</button></div>}
+        {error && <div className="error-box" role="alert"><p>{error}</p><button className="text-btn" type="button" onClick={workflowMode === 'contour' ? runContourAnalysis : runAnalysis}>Try again</button></div>}
 
         {contourAnalysis && (
           <div className="results">
