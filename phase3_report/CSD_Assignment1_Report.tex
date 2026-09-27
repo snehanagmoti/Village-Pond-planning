@@ -1,7 +1,8 @@
 %% CSD Assignment 1 - Final Technical Report
 %% Uses the supplied ACM manuscript template without changing its layout.
-\documentclass[manuscript,screen,review]{acmart}
+\documentclass[manuscript,screen]{acmart}
 \usepackage{xurl}
+\hypersetup{colorlinks=true,linkcolor=black,citecolor=black,urlcolor=blue}
 
 \AtBeginDocument{\providecommand\BibTeX{{Bib\TeX}}}
 \setcopyright{none}
@@ -10,8 +11,8 @@
 
 \begin{document}
 
-\title{AI-based Village Pond Planning System}
-\subtitle{CSD Assignment 1 -- Final Technical Report}
+\title{Web-Based Village Pond Planning System}
+\subtitle{CSD Assignment 1 -- Phase 3 Final Technical Report}
 
 \author{Sneha Nagmoti}
 \affiliation{%
@@ -204,21 +205,26 @@ The map displays the selected catchment boundary and pond options, with an on-ma
 \section{Discussion and Limitations}
 The strongest result is traceability: every recommendation is accompanied by its watershed, ranked alternatives, source states and assumptions. Nevertheless, GLO-90-scale/public elevation cannot resolve small bunds and culverts; harmonic reconstruction between contours smooths unmeasured terrain; RGB/HSV screening may miss narrow, muddy, shaded or seasonal water; a uniform runoff coefficient ignores soil and land-use variation; and long-term annual rainfall does not replace design-storm routing. Land ownership is not inferred. The map therefore supports comparative screening, not construction approval. Future work should incorporate verified cadastral parcels, higher-resolution survey DEMs, official hydrography, soil-specific coefficients, IDF curves, spillway routing and measured validation sites.
 
-\section{AI Tool Usage Declaration}
-LLM tools were used for report drafting, formatting assistance, implementation assistance, test-plan review and assignment-requirement verification. Suggestions were checked against source code, automated test results, deployed API responses and map output. No LLM output was used as hydrological ground truth; terrain and runoff results are calculated from the input data and stated model assumptions.
-
 \section{Submission Links}
-\begin{itemize}
-  \item GitHub repository: \url{https://github.com/snehanagmoti/Village-Pond-planning}
-  \item Allotted-system frontend: \url{http://10.1.75.53:3238/}
-  \item Backend upload route (POST, file field \texttt{contour\_map}): \url{http://10.1.75.53:3238/api/analyze-contour}
-  \item Interactive API documentation: \url{http://10.1.75.53:3238/docs}
-\end{itemize}
-These private addresses require access to the college network. The public demonstration-video link is supplied separately with the submission.
+\begin{table}[h]
+  \caption{Clickable submission and verification links}
+  \label{tab:submission-links}
+  \begin{tabular}{p{2.7cm}p{5.6cm}}
+    \toprule
+    Item & Link \\
+    \midrule
+    GitHub repository & \href{https://github.com/snehanagmoti/Village-Pond-planning}{Open source repository} \\
+    Public frontend & \href{https://sneha-village-pond-planning-2026.onrender.com/}{Open public web application} \\
+    Allotted-system frontend & \href{http://10.1.75.53:3238/}{Open college-system application} \\
+    Interactive API docs & \href{http://10.1.75.53:3238/docs}{Open Swagger documentation} \\
+    Contour-analysis API & \href{http://10.1.75.53:3238/api/analyze-contour}{POST /api/analyze-contour} (field: \texttt{contour\_map}) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+The allotted-system URLs require access to the college network. The public YouTube demonstration link must be added to the submission after the final voice-over and upload; no unverified video URL is included here.
 
-\appendix
-\section{Source Code and Repository}
-The repository is available at \url{https://github.com/snehanagmoti/Village-Pond-planning}. The \texttt{backend/} directory contains FastAPI routes, configuration, typed schemas, data-source adapters, hydrology/vision algorithms and Pytest tests. The \texttt{frontend/} directory contains the React/Leaflet interface, Vitest tests and Nginx configuration. \texttt{render.yaml} defines the public deployment, while \texttt{docs/} and \texttt{phase3\_report/} contain explanatory and submission material. The submitted revision is reproducible from the repository and contains no sample-specific hard-coded result coordinates.
+\section{AI-Assistance Disclosure}
+AI tools were used for reviewing code and for report formatting. All technical statements were checked against the source code, automated test results, deployed API responses and map output. AI output was not used as hydrological ground truth; terrain, catchment and runoff results are produced by the implemented algorithms from the stated inputs and assumptions.
 
 \begin{thebibliography}{6}
 \bibitem{openmeteo} Open-Meteo, ``Historical Weather and Elevation APIs,'' \url{https://open-meteo.com/}.
