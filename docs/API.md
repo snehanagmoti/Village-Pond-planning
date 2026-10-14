@@ -15,7 +15,8 @@ screening outputs, not construction designs or land-ownership determinations.
 ### `POST /api/analyze-contour`
 
 Uploads a KML or KMZ contour map, reconstructs a gridded elevation surface,
-screens satellite water, ranks spatially separated pond alternatives, delineates
+excludes mapped hydrography, satellite-detected water, and buffered major
+drainage corridors, ranks spatially separated pond alternatives, delineates
 the D8 catchment draining to the selected candidate, queries historical
 rainfall, and returns runoff plus preliminary pond geometry. Use the
 teacher-specified multipart field `contour_map`; `contour_file` remains accepted
@@ -26,7 +27,8 @@ Selection fields are optional multipart form values:
 - `selection_mode=automatic` ranks the full eligible study area (default);
 - `selection_mode=point` requires `selected_lat` and `selected_lng`; the point
   is snapped to the terrain grid and rejected if it is outside the study area,
-  on an outlet, inside detected water, or inside the configured boundary setback;
+  on an outlet, inside a mapped/detected water or major-drainage buffer, or
+  inside the configured boundary setback;
 - `selection_mode=region` requires `selected_region`, a JSON array containing
   3-100 `{ "lat": ..., "lng": ... }` vertices. Options are ranked only inside
   that polygon.

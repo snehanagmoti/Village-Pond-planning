@@ -70,7 +70,8 @@ quality limitations instead of inventing convincing fallback values.
 - historical ERA5-Land rainfall climatology with valid-year accounting;
 - NASA POWER daily precipitation fallback with the same complete-year checks
   when the primary archive quota is unavailable;
-- satellite RGB/HSV surface screening labelled as a candidate only;
+- fail-closed water screening that combines OpenStreetMap mapped hydrography,
+  satellite RGB/HSV detection, and buffered DEM-derived major drainage;
 - annual runoff only when an approved coefficient and source are configured;
 - peak discharge only when an approved design intensity is configured;
 - side-sloped pond geometry with water depth, freeboard, water dimensions,

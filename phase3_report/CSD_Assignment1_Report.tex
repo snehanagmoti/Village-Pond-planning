@@ -52,7 +52,7 @@ The required system must accept a user-defined land area, analyze its terrain an
     \midrule
     Satellite map and land selection & React/Leaflet map, search, coordinate and radius controls \\
     Contour visualization/upload & Upload workspace and \texttt{/api/analyze-contour} \\
-    Candidate-land identification & RGB/HSV OpenCV screening with morphology and water mask \\
+    Candidate-land identification & Mapped hydrography, RGB/HSV satellite screening and buffered major-drainage exclusion \\
     Catchment estimation & Priority-Flood, resolved-flat D8 and reverse watershed traversal \\
     Historical rainfall & Open-Meteo archive with NASA POWER fallback \\
     Runoff and pond sizing & \texttt{terrain.py} volumetric runoff and trapezoidal geometry \\
@@ -203,7 +203,7 @@ The frontend and API run together on allotted system 2, accessed through SSH por
 The map displays the selected catchment boundary and pond options, with an on-map summary of catchment area, expected annual runoff, coordinates and storage capacity. Annual collected runoff and physical storage capacity are labelled separately. On narrow screens the summary remains visible with the controls panel collapsed. Deployment commands, resource checks and reproducible verification scripts are included in the repository.
 
 \section{Discussion and Limitations}
-The strongest result is traceability: every recommendation is accompanied by its watershed, ranked alternatives, source states and assumptions. Nevertheless, GLO-90-scale/public elevation cannot resolve small bunds and culverts; harmonic reconstruction between contours smooths unmeasured terrain; RGB/HSV screening may miss narrow, muddy, shaded or seasonal water; a uniform runoff coefficient ignores soil and land-use variation; and long-term annual rainfall does not replace design-storm routing. Land ownership is not inferred. The map therefore supports comparative screening, not construction approval. Future work should incorporate verified cadastral parcels, higher-resolution survey DEMs, official hydrography, soil-specific coefficients, IDF curves, spillway routing and measured validation sites.
+The strongest result is traceability: every recommendation is accompanied by its watershed, ranked alternatives, source states and assumptions. Nevertheless, GLO-90-scale/public elevation cannot resolve small bunds and culverts; harmonic reconstruction between contours smooths unmeasured terrain; mapped hydrography plus RGB/HSV screening can still miss unmapped seasonal or recently changed channels; a uniform runoff coefficient ignores soil and land-use variation; and long-term annual rainfall does not replace design-storm routing. Land ownership is not inferred. The map therefore supports comparative screening, not construction approval. Future work should incorporate verified cadastral parcels, higher-resolution survey DEMs, official hydrography, soil-specific coefficients, IDF curves, spillway routing and measured validation sites.
 
 \section{Submission Links}
 \begin{table}[h]

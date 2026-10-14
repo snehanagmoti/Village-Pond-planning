@@ -9,6 +9,7 @@ from services import cv_analyzer
 from services.cv_analyzer import (
     analyze_satellite_image,
     contour_to_polygon,
+    extract_mapped_water_mask,
     raster_mask_to_terrain_grid,
 )
 from services.quality import UpstreamDataError
@@ -45,6 +46,16 @@ def test_detected_water_is_buffered_out_of_candidate_mask():
             cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)),
         )
         assert cv2.countNonZero(cv2.bitwise_and(result.candidate_mask, buffered_water)) == 0
+
+
+def test_mapped_hydrography_detects_cyan_water_but_not_map_land():
+    map_image = np.full((64, 64, 3), (233, 239, 242), dtype=np.uint8)
+    cv2.rectangle(map_image, (20, 0), (42, 63), (223, 211, 170), -1)
+
+    mask = extract_mapped_water_mask(map_image)
+
+    assert mask[32, 31] == 255
+    assert mask[32, 5] == 0
 
 
 def test_imagery_mask_is_flipped_to_dem_latitude_order():

@@ -15,3 +15,4 @@ def deterministic_application_settings(monkeypatch):
     monkeypatch.setattr(pond_planner.settings, "approved_runoff_coefficient_source", None)
     monkeypatch.setattr(pond_planner.settings, "design_rainfall_intensity_mm_h", None)
     monkeypatch.setattr(pond_planner.settings, "history_enabled", False)
+    pond_planner.limiter._events.clear()

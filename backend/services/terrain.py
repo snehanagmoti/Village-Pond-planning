@@ -194,6 +194,20 @@ def polygon_to_mask(
         y = (point["lat"] - lat_min) / (lat_max - lat_min) * (rows - 1)
         points.append([int(round(x)), int(round(y))])
     cv2.fillPoly(mask, np.asarray([points], dtype=np.int32), 1)
+    # Raster rounding can include a cell whose centre lies just outside the
+    # requested polygon. Recheck included centres against the original
+    # floating-point geometry so point/region selections remain exact.
+    geographic_contour = np.asarray(
+        [[[float(point["lng"]), float(point["lat"])]] for point in polygon_raw],
+        dtype=np.float32,
+    )
+    for row, col in zip(*np.where(mask > 0), strict=False):
+        if cv2.pointPolygonTest(
+            geographic_contour,
+            (float(lng_array[col]), float(lat_array[row])),
+            False,
+        ) < 0:
+            mask[row, col] = 0
     return mask.astype(bool)
 
 
@@ -693,7 +707,28 @@ def run_terrain_analysis(
             lat_cell_m=lat_cell_m,
             lng_cell_m=lng_cell_m,
         )
+        # Every displayed option must itself produce a valid contributing
+        # catchment; otherwise selecting a shown alternative can fail later.
+        def valid_candidate_catchment(cell: tuple[int, int]) -> bool:
+            option_catchment = (
+                delineate_catchment(flow_direction, cell[0], cell[1]) & valid_mask
+            )
+            return int(np.sum(option_catchment)) >= 3 and len(
+                extract_catchment_boundary(option_catchment, lat_array, lng_array)
+            ) >= 3
+
+        ranked_cells = [cell for cell in ranked_cells if valid_candidate_catchment(cell)]
         if mode == "point":
+            point_catchment = (
+                delineate_catchment(flow_direction, selected_cell[0], selected_cell[1])
+                & valid_mask
+            )
+            if int(np.sum(point_catchment)) < 3 or len(
+                extract_catchment_boundary(point_catchment, lat_array, lng_array)
+            ) < 3:
+                raise AnalysisValidationError(
+                    "Selected point does not define a valid contributing catchment"
+                )
             ranked_cells = [selected_cell] + [
                 cell for cell in ranked_cells
                 if cell != selected_cell

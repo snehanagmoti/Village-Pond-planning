@@ -120,6 +120,10 @@ class Settings:
         self.geocoding_url = os.getenv(
             "GEOCODING_URL", "https://nominatim.openstreetmap.org/search"
         ).strip()
+        self.mapped_hydrography_tile_url = os.getenv(
+            "MAPPED_HYDROGRAPHY_TILE_URL",
+            "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+        ).strip()
         self.geocoding_min_interval_seconds = _float(
             "GEOCODING_MIN_INTERVAL_SECONDS", 1.05, 1.0
         )

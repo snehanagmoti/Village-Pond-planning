@@ -13,7 +13,7 @@ from services.contour_analyzer import (
     analyze_contour_file,
     parse_contour_document,
 )
-from services.cv_analyzer import SatelliteMosaic
+from services.cv_analyzer import MappedHydrography, SatelliteMosaic
 from services.quality import SourceInfo, UpstreamDataError
 from services.rainfall import RainfallResult
 
@@ -43,8 +43,17 @@ def contour_sources(monkeypatch):
             source=SourceInfo(name="test imagery", status="reliable", resolution="10 m"),
         )
 
+    async def hydrography(lat, lng, radius):
+        offset = radius / 111.32
+        return MappedHydrography(
+            mask=np.zeros((96, 96), dtype=np.uint8),
+            bounds=(lat - offset, lat + offset, lng - offset, lng + offset),
+            source=SourceInfo(name="test mapped hydrography", status="reliable"),
+        )
+
     monkeypatch.setattr(pond_planner, "get_rainfall_data", rainfall)
     monkeypatch.setattr(pond_planner, "download_satellite_mosaic", imagery)
+    monkeypatch.setattr(pond_planner, "download_mapped_hydrography", hydrography)
     monkeypatch.setattr(pond_planner.settings, "approved_runoff_coefficient", 0.3)
     monkeypatch.setattr(
         pond_planner.settings,
@@ -286,6 +295,25 @@ async def test_contour_api_fails_closed_when_water_screening_is_unavailable(monk
         raise UpstreamDataError("satellite_imagery", "test imagery outage")
 
     monkeypatch.setattr(pond_planner, "download_satellite_mosaic", unavailable_imagery)
+    response = await client.post(
+        "/api/analyze-contour",
+        files={"contour_file": ("terrain.kml", synthetic_kml())},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "water_screening_unavailable"
+
+
+@pytest.mark.anyio
+async def test_contour_api_fails_closed_when_mapped_hydrography_is_unavailable(
+    monkeypatch, client
+):
+    async def unavailable_hydrography(*_args, **_kwargs):
+        raise UpstreamDataError("mapped_hydrography", "test map outage")
+
+    monkeypatch.setattr(
+        pond_planner, "download_mapped_hydrography", unavailable_hydrography
+    )
     response = await client.post(
         "/api/analyze-contour",
         files={"contour_file": ("terrain.kml", synthetic_kml())},

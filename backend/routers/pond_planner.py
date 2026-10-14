@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Annotated, List
 
+import cv2
 from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Request, UploadFile
 
 from config import get_settings
@@ -40,6 +41,7 @@ from services.cv_analyzer import (
     analyze_satellite_image,
     buffer_terrain_exclusion,
     contour_to_polygon,
+    download_mapped_hydrography,
     download_satellite_mosaic,
     raster_mask_to_terrain_grid,
 )
@@ -171,14 +173,20 @@ async def analyze_contour_upload(
 
     rainfall_task = asyncio.create_task(get_rainfall_data(center_lat, center_lng))
     imagery_task = None
+    hydrography_task = None
     if coverage_radius_km <= settings.analysis_max_radius_km:
         imagery_task = asyncio.create_task(
             download_satellite_mosaic(center_lat, center_lng, coverage_radius_km)
+        )
+        hydrography_task = asyncio.create_task(
+            download_mapped_hydrography(center_lat, center_lng, coverage_radius_km)
         )
 
     imagery_result = None
     land_result = None
     imagery_error: Exception | None = None
+    hydrography_result = None
+    hydrography_error: Exception | None = None
     if imagery_task is None:
         imagery_error = UpstreamDataError(
             "satellite_imagery",
@@ -193,17 +201,40 @@ async def analyze_contour_upload(
         except Exception as exc:
             imagery_error = exc
 
+    if hydrography_task is None:
+        hydrography_error = UpstreamDataError(
+            "mapped_hydrography",
+            "Contour coverage exceeds the configured hydrography-screening radius",
+        )
+    else:
+        try:
+            hydrography_result = await hydrography_task
+        except Exception as exc:
+            hydrography_error = exc
+
     # Fail closed: the assignment forbids selecting an existing water body or
     # river.  Returning a pond point without the independent imagery exclusion
     # would silently weaken that requirement.
-    if imagery_result is None or land_result is None or land_result.water_mask is None:
+    if (
+        imagery_result is None
+        or land_result is None
+        or land_result.water_mask is None
+        or hydrography_result is None
+    ):
         rainfall_task.cancel()
         await asyncio.gather(rainfall_task, return_exceptions=True)
-        message = (
-            imagery_error.message
-            if isinstance(imagery_error, UpstreamDataError)
-            else "Satellite water screening failed"
-        )
+        if hydrography_result is None:
+            message = (
+                hydrography_error.message
+                if isinstance(hydrography_error, UpstreamDataError)
+                else "Mapped river and water-body screening failed"
+            )
+        else:
+            message = (
+                imagery_error.message
+                if isinstance(imagery_error, UpstreamDataError)
+                else "Satellite water screening failed"
+            )
         raise HTTPException(
             status_code=503,
             detail={
@@ -211,6 +242,15 @@ async def analyze_contour_upload(
                 "message": f"Water and river exclusion could not be verified: {message}",
             },
         )
+
+    mapped_mask = hydrography_result.mask
+    if mapped_mask.shape != land_result.water_mask.shape:
+        mapped_mask = cv2.resize(
+            mapped_mask,
+            (land_result.water_mask.shape[1], land_result.water_mask.shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        )
+    combined_water_mask = cv2.bitwise_or(land_result.water_mask, mapped_mask)
 
     try:
         result = await asyncio.to_thread(
@@ -220,7 +260,7 @@ async def analyze_contour_upload(
             selection_mode=mode,
             selected_point=point,
             selected_region=region,
-            water_mask=land_result.water_mask if land_result else None,
+            water_mask=combined_water_mask,
             water_bounds=imagery_result.bounds if imagery_result else None,
             water_exclusion_buffer_m=settings.contour_detected_water_setback_m,
         )
@@ -255,12 +295,18 @@ async def analyze_contour_upload(
     if imagery_result is not None and land_result is not None:
         sources["imagery"] = _source_model(imagery_result.source).model_dump(mode="json")
         sources["water_screening"] = _source_model(SourceInfo(
-            name="RGB/HSV satellite water exclusion",
-            status="degraded",
+            name="Satellite plus mapped hydrography exclusion",
+            status="reliable",
             resolution=imagery_result.source.resolution,
             coverage_ratio=imagery_result.source.coverage_ratio,
-            message=land_result.message,
+            message=(
+                "Mapped rivers and water bodies are combined with conservative "
+                "satellite water detection before candidate scoring"
+            ),
         )).model_dump(mode="json")
+        sources["mapped_hydrography"] = _source_model(
+            hydrography_result.source
+        ).model_dump(mode="json")
     else:
         message = (
             imagery_error.message

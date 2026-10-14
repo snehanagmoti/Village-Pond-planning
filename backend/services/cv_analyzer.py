@@ -30,6 +30,13 @@ class SatelliteMosaic:
 
 
 @dataclass
+class MappedHydrography:
+    mask: np.ndarray
+    bounds: Tuple[float, float, float, float]
+    source: SourceInfo
+
+
+@dataclass
 class LandCoverResult:
     bare_surface_ratio: float
     vegetation_ratio: float
@@ -79,15 +86,24 @@ def _choose_zoom(radius_km: float) -> int:
     return 13
 
 
-async def _download_tile(semaphore: asyncio.Semaphore, x: int, y: int, zoom: int):
-    cache_key = (settings.imagery_tile_url, zoom, x, y)
+async def _download_tile(
+    semaphore: asyncio.Semaphore,
+    x: int,
+    y: int,
+    zoom: int,
+    *,
+    tile_url: Optional[str] = None,
+    headers: Optional[dict[str, str]] = None,
+):
+    template = tile_url or settings.imagery_tile_url
+    cache_key = (template, zoom, x, y)
     cached = _tile_cache.get(cache_key)
     if cached is not None:
         return x, y, cached
     async with semaphore:
         response = await get_with_retries(
-            settings.imagery_tile_url.format(z=zoom, y=y, x=x),
-            headers={"Accept": "image/*"},
+            template.format(z=zoom, y=y, x=x),
+            headers=headers or {"Accept": "image/*"},
         )
     if response.status_code != 200 or not response.content:
         return x, y, None
@@ -99,6 +115,60 @@ async def _download_tile(semaphore: asyncio.Semaphore, x: int, y: int, zoom: int
         return x, y, None
     _tile_cache.set(cache_key, image)
     return x, y, image
+
+
+def _assemble_tile_crop(
+    tiles: dict[tuple[int, int], np.ndarray],
+    *,
+    x_min: int,
+    x_max: int,
+    y_min: int,
+    y_max: int,
+    lat_min: float,
+    lat_max: float,
+    lng_min: float,
+    lng_max: float,
+    zoom: int,
+    source_key: str,
+) -> np.ndarray:
+    tile_height, tile_width = next(iter(tiles.values())).shape[:2]
+    mosaic = np.zeros(
+        ((y_max - y_min + 1) * tile_height, (x_max - x_min + 1) * tile_width, 3),
+        dtype=np.uint8,
+    )
+    for (x, y), image in tiles.items():
+        row = (y - y_min) * tile_height
+        col = (x - x_min) * tile_width
+        mosaic[row : row + tile_height, col : col + tile_width] = image
+
+    west_x, north_y = _lat_lng_to_fractional_tile(lat_max, lng_min, zoom)
+    east_x, south_y = _lat_lng_to_fractional_tile(lat_min, lng_max, zoom)
+    left = max(0, int(math.floor((west_x - x_min) * tile_width)))
+    right = min(mosaic.shape[1], int(math.ceil((east_x - x_min) * tile_width)))
+    top = max(0, int(math.floor((north_y - y_min) * tile_height)))
+    bottom = min(mosaic.shape[0], int(math.ceil((south_y - y_min) * tile_height)))
+    if right - left < 32 or bottom - top < 32:
+        raise UpstreamDataError(source_key, "Map crop is unexpectedly small")
+    return mosaic[top:bottom, left:right].copy()
+
+
+def extract_mapped_water_mask(map_image: np.ndarray) -> np.ndarray:
+    """Extract the standard-map cyan hydrography without treating it as land data."""
+    if map_image is None or map_image.ndim != 3 or map_image.shape[2] != 3:
+        raise UpstreamDataError("mapped_hydrography", "Decoded map has an invalid shape")
+    blue, green, red = cv2.split(map_image)
+    mapped_water = (
+        (blue >= 190)
+        & (green >= 180)
+        & (red <= 205)
+        & (blue.astype(np.int16) >= red.astype(np.int16) + 22)
+        & (green.astype(np.int16) >= red.astype(np.int16) + 12)
+    ).astype(np.uint8) * 255
+    return cv2.morphologyEx(
+        mapped_water,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+    )
 
 
 async def download_satellite_mosaic(lat: float, lng: float, radius_km: float) -> SatelliteMosaic:
@@ -138,24 +208,19 @@ async def download_satellite_mosaic(lat: float, lng: float, radius_km: float) ->
     tile_height, tile_width = next(iter(tiles.values())).shape[:2]
     if any(image.shape != (tile_height, tile_width, 3) for image in tiles.values()):
         raise UpstreamDataError("satellite_imagery", "Imagery tiles have inconsistent dimensions")
-    mosaic = np.zeros(
-        ((y_max - y_min + 1) * tile_height, (x_max - x_min + 1) * tile_width, 3),
-        dtype=np.uint8,
+    mosaic = _assemble_tile_crop(
+        tiles,
+        x_min=x_min,
+        x_max=x_max,
+        y_min=y_min,
+        y_max=y_max,
+        lat_min=lat_min,
+        lat_max=lat_max,
+        lng_min=lng_min,
+        lng_max=lng_max,
+        zoom=zoom,
+        source_key="satellite_imagery",
     )
-    for (x, y), image in tiles.items():
-        row = (y - y_min) * tile_height
-        col = (x - x_min) * tile_width
-        mosaic[row : row + tile_height, col : col + tile_width] = image
-
-    west_x, north_y = _lat_lng_to_fractional_tile(lat_max, lng_min, zoom)
-    east_x, south_y = _lat_lng_to_fractional_tile(lat_min, lng_max, zoom)
-    left = max(0, int(math.floor((west_x - x_min) * tile_width)))
-    right = min(mosaic.shape[1], int(math.ceil((east_x - x_min) * tile_width)))
-    top = max(0, int(math.floor((north_y - y_min) * tile_height)))
-    bottom = min(mosaic.shape[0], int(math.ceil((south_y - y_min) * tile_height)))
-    if right - left < 32 or bottom - top < 32:
-        raise UpstreamDataError("satellite_imagery", "Imagery crop is unexpectedly small")
-    mosaic = mosaic[top:bottom, left:right].copy()
     mosaic_bounds = (lat_min, lat_max, lng_min, lng_max)
     pixel_resolution = 156543.03392 * math.cos(math.radians(lat)) / (2**zoom)
     source = SourceInfo(
@@ -169,6 +234,88 @@ async def download_satellite_mosaic(lat: float, lng: float, radius_km: float) ->
     result = SatelliteMosaic(mosaic, mosaic_bounds, zoom, source)
     _cache.set(cache_key, result)
     return result
+
+
+async def download_mapped_hydrography(
+    lat: float, lng: float, radius_km: float
+) -> MappedHydrography:
+    """Return mapped rivers and water bodies as a conservative exclusion mask."""
+    zoom = _choose_zoom(radius_km)
+    lat_min, lat_max, lng_min, lng_max = _study_bounds(lat, lng, radius_km)
+    x_min, y_max = _lat_lng_to_tile(lat_min, lng_min, zoom)
+    x_max, y_min = _lat_lng_to_tile(lat_max, lng_max, zoom)
+    if x_max < x_min:
+        x_min, x_max = x_max, x_min
+    if y_max < y_min:
+        y_min, y_max = y_max, y_min
+    tile_count = (x_max - x_min + 1) * (y_max - y_min + 1)
+    if tile_count > 64:
+        raise UpstreamDataError(
+            "mapped_hydrography", f"Study area requires too many map tiles ({tile_count})"
+        )
+
+    semaphore = asyncio.Semaphore(4)
+    downloads = await asyncio.gather(
+        *[
+            _download_tile(
+                semaphore,
+                x,
+                y,
+                zoom,
+                tile_url=settings.mapped_hydrography_tile_url,
+                headers={
+                    "Accept": "image/png,image/*",
+                    "User-Agent": "VillagePondPlanningCourseProject/2.0",
+                },
+            )
+            for y in range(y_min, y_max + 1)
+            for x in range(x_min, x_max + 1)
+        ],
+        return_exceptions=True,
+    )
+    tiles = {
+        (item[0], item[1]): item[2]
+        for item in downloads
+        if not isinstance(item, BaseException) and item[2] is not None
+    }
+    coverage = len(tiles) / tile_count
+    if coverage < 1.0:
+        raise UpstreamDataError(
+            "mapped_hydrography",
+            f"Mapped hydrography coverage is insufficient ({coverage * 100:.1f}%)",
+        )
+    tile_height, tile_width = next(iter(tiles.values())).shape[:2]
+    if any(image.shape != (tile_height, tile_width, 3) for image in tiles.values()):
+        raise UpstreamDataError("mapped_hydrography", "Map tiles have inconsistent dimensions")
+    mosaic = _assemble_tile_crop(
+        tiles,
+        x_min=x_min,
+        x_max=x_max,
+        y_min=y_min,
+        y_max=y_max,
+        lat_min=lat_min,
+        lat_max=lat_max,
+        lng_min=lng_min,
+        lng_max=lng_max,
+        zoom=zoom,
+        source_key="mapped_hydrography",
+    )
+
+    # OSM water is light cyan (#aad3df). Tolerances include antialiased edges
+    # and mapped waterways while rejecting grey roads and beige land.
+    mapped_water = extract_mapped_water_mask(mosaic)
+    return MappedHydrography(
+        mask=mapped_water,
+        bounds=(lat_min, lat_max, lng_min, lng_max),
+        source=SourceInfo(
+            name="OpenStreetMap mapped hydrography",
+            status="reliable",
+            resolution=f"mapped water at zoom {zoom}",
+            coverage_ratio=round(coverage, 4),
+            message="Mapped rivers and water bodies used as a hard exclusion layer",
+            license_url="https://www.openstreetmap.org/copyright",
+        ),
+    )
 
 
 def analyze_satellite_image(image: np.ndarray) -> LandCoverResult:

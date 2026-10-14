@@ -523,7 +523,7 @@ def analyze_contour_file(
         )
     else:
         warnings.append(
-            "Pixels classified as water and a surrounding safety buffer were excluded from every candidate. Satellite colour screening can miss muddy, narrow, shaded, seasonal or cloud-covered rivers, so field and hydrography checks remain mandatory."
+            "Mapped hydrography and satellite-classified water, with a surrounding safety buffer, were excluded from every candidate. Field verification remains necessary for unmapped seasonal or recently changed channels."
         )
     if not dataset.boundary:
         warnings.append("No study-area polygon was supplied, so the contour bounding rectangle was used.")
@@ -613,13 +613,13 @@ def analyze_contour_file(
         "eligible_candidate_area_sqm": round(float(terrain["candidate_area_sqm"]), 2),
         "water_screening": {
             "status": "applied" if water_exclusion is not None else "unavailable",
-            "method": "Conservative satellite water classification plus buffered DEM-derived major-drainage exclusion",
+            "method": "OpenStreetMap hydrography, satellite water classification and buffered DEM-derived major-drainage exclusion",
             "detected_water_ratio": (
                 round(detected_water_ratio, 5) if detected_water_ratio is not None else None
             ),
             "exclusion_buffer_m": round(float(water_exclusion_buffer_m), 1),
             "message": (
-                "Detected water and modeled major-drainage corridors were excluded before candidate scoring."
+                "Mapped rivers, detected water and modeled major-drainage corridors were excluded before candidate scoring."
                 if water_exclusion is not None
                 else "No valid satellite water mask was available; hydrography and field verification are required."
             ),
