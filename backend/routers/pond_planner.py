@@ -43,6 +43,7 @@ from services.cv_analyzer import (
     contour_to_polygon,
     download_mapped_hydrography,
     download_satellite_mosaic,
+    geospatial_mask_to_terrain_grid,
     raster_mask_to_terrain_grid,
 )
 from services.elevation import fetch_elevation_grid
@@ -419,6 +420,9 @@ async def analyze_location(payload: AnalysisRequest, http_request: Request) -> A
     imagery_task = asyncio.create_task(
         download_satellite_mosaic(payload.center.lat, payload.center.lng, payload.radius_km)
     )
+    hydrography_task = asyncio.create_task(
+        download_mapped_hydrography(payload.center.lat, payload.center.lng, payload.radius_km)
+    )
     rainfall_task = asyncio.create_task(
         get_rainfall_data(payload.center.lat, payload.center.lng)
     )
@@ -426,8 +430,9 @@ async def analyze_location(payload: AnalysisRequest, http_request: Request) -> A
         elevation_result = await elevation_task
     except Exception as elevation_error:
         imagery_task.cancel()
+        hydrography_task.cancel()
         rainfall_task.cancel()
-        await asyncio.gather(imagery_task, rainfall_task, return_exceptions=True)
+        await asyncio.gather(imagery_task, hydrography_task, rainfall_task, return_exceptions=True)
         message = (
             elevation_error.message
             if isinstance(elevation_error, UpstreamDataError)
@@ -437,8 +442,8 @@ async def analyze_location(payload: AnalysisRequest, http_request: Request) -> A
             status_code=503,
             detail={"code": "elevation_unavailable", "message": message},
         ) from elevation_error
-    imagery_result, rainfall_result = await asyncio.gather(
-        imagery_task, rainfall_task, return_exceptions=True
+    imagery_result, hydrography_result, rainfall_result = await asyncio.gather(
+        imagery_task, hydrography_task, rainfall_task, return_exceptions=True
     )
 
     warnings = []
@@ -468,13 +473,9 @@ async def analyze_location(payload: AnalysisRequest, http_request: Request) -> A
                     land_result.candidate_mask, elevation_result.dem.shape
                 )
             if land_result.water_mask is not None:
-                water_exclusion_grid = raster_mask_to_terrain_grid(
-                    land_result.water_mask, elevation_result.dem.shape
-                )
-                water_exclusion_grid = buffer_terrain_exclusion(
-                    water_exclusion_grid,
-                    settings.contour_detected_water_setback_m,
-                    elevation_result.cell_size_m,
+                water_exclusion_grid = geospatial_mask_to_terrain_grid(
+                    land_result.water_mask, imagery_result.bounds,
+                    elevation_result.latitudes, elevation_result.longitudes,
                 )
             land_source = SourceInfo(
                 name="RGB/HSV land-cover screening",
@@ -490,6 +491,25 @@ async def analyze_location(payload: AnalysisRequest, http_request: Request) -> A
                 "RGB/HSV land-cover screening", f"Land-cover analysis failed: {type(exc).__name__}"
             )
             warnings.append("Land-cover analysis failed; no land candidate or pond location was produced.")
+
+    if water_exclusion_grid is None or isinstance(hydrography_result, Exception):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "water_screening_unavailable",
+                "message": "Satellite and mapped river/water-body screening are required before recommending a pond.",
+            },
+        )
+    mapped_exclusions = geospatial_mask_to_terrain_grid(
+        hydrography_result.mask, hydrography_result.bounds,
+        elevation_result.latitudes, elevation_result.longitudes,
+    )
+    water_exclusion_grid = buffer_terrain_exclusion(
+        water_exclusion_grid | mapped_exclusions,
+        settings.contour_detected_water_setback_m,
+        elevation_result.cell_size_m,
+    )
+    sources["mapped_hydrography"] = _source_model(hydrography_result.source)
 
     if isinstance(rainfall_result, Exception):
         message = rainfall_result.message if isinstance(rainfall_result, UpstreamDataError) else "Rainfall processing failed"

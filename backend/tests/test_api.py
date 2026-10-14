@@ -4,10 +4,24 @@ import pytest
 
 from main import app
 from routers import pond_planner
-from services.cv_analyzer import LandCoverResult, SatelliteMosaic
+from services.cv_analyzer import LandCoverResult, SatelliteMosaic, MappedHydrography
 from services.elevation import ElevationGrid
 from services.quality import SourceInfo, UpstreamDataError
 from services.rainfall import RainfallResult
+
+
+@pytest.fixture
+def mapped_water(monkeypatch):
+    async def hydrography(*args, **kwargs):
+        mask = np.zeros((128, 128), dtype=np.uint8)
+        mask[:16, :16] = 255
+        return MappedHydrography(mask, _imagery().bounds, SourceInfo(name="test map", status="reliable"))
+    monkeypatch.setattr(pond_planner, "download_mapped_hydrography", hydrography)
+
+
+@pytest.fixture(autouse=True)
+def use_mapped_water(mapped_water):
+    pass
 
 
 @pytest.fixture
@@ -62,9 +76,12 @@ async def test_analysis_contract_exposes_quality_and_uses_no_fallback(monkeypatc
         return _rainfall()
 
     def land(*args, **kwargs):
-        return LandCoverResult(0.3, 0.4, 0.1, 0.1, None, "degraded", "screening only")
+        return LandCoverResult(0.3, 0.4, 0.1, 0.1, None, "degraded", "screening only", water_mask=np.zeros((128, 128), dtype=np.uint8))
 
     def terrain(*args, **kwargs):
+        # Mapped water is north-west: north-up raster must map to final DEM rows.
+        assert kwargs["candidate_exclusion_mask"][-1, 0]
+        assert not kwargs["candidate_exclusion_mask"][0, -1]
         return {
             "catchment_polygon": [
                 {"lat": 18.0, "lng": 73.0}, {"lat": 18.0, "lng": 73.01},
@@ -123,6 +140,39 @@ async def test_required_elevation_failure_returns_503(monkeypatch, client):
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("missing_source", ["map", "satellite"])
+async def test_live_analysis_fails_closed_without_water_evidence(monkeypatch, client, missing_source):
+    async def elevation(*args):
+        return _elevation()
+
+    async def imagery(*args):
+        if missing_source == "satellite":
+            raise UpstreamDataError("imagery", "test outage")
+        return _imagery()
+
+    async def rain(*args):
+        return _rainfall()
+
+    async def unavailable(*args):
+        raise UpstreamDataError("mapped_hydrography", "test outage")
+
+    def no_terrain(*args, **kwargs):
+        pytest.fail("Candidate ranking must not run without water evidence")
+
+    monkeypatch.setattr(pond_planner, "fetch_elevation_grid", elevation)
+    monkeypatch.setattr(pond_planner, "download_satellite_mosaic", imagery)
+    monkeypatch.setattr(pond_planner, "get_rainfall_data", rain)
+    monkeypatch.setattr(pond_planner, "run_terrain_analysis", no_terrain)
+    if missing_source == "map":
+        monkeypatch.setattr(pond_planner, "download_mapped_hydrography", unavailable)
+    response = await client.post(
+        "/api/analyze", json={"center": {"lat": 18.005, "lng": 73.005}, "radius_km": 1}
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "water_screening_unavailable"
+
+
+@pytest.mark.anyio
 async def test_extreme_mercator_latitude_is_rejected(client):
     response = await client.post(
         "/api/analyze", json={"center": {"lat": 89, "lng": 73}, "radius_km": 1}
@@ -149,7 +199,7 @@ async def test_approved_coefficient_produces_consistent_screening_geometry(monke
 
     def land(*args, **kwargs):
         contour = np.array([[[10, 10]], [[100, 10]], [[100, 100]], [[10, 100]]])
-        return LandCoverResult(0.3, 0.4, 0.1, 0.1, contour, "degraded", "screening only")
+        return LandCoverResult(0.3, 0.4, 0.1, 0.1, contour, "degraded", "screening only", water_mask=np.zeros((128, 128), dtype=np.uint8))
 
     def polygon(*args, **kwargs):
         return [

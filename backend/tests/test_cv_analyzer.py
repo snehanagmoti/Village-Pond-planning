@@ -10,9 +10,23 @@ from services.cv_analyzer import (
     analyze_satellite_image,
     contour_to_polygon,
     extract_mapped_water_mask,
+    geospatial_mask_to_terrain_grid,
     raster_mask_to_terrain_grid,
 )
 from services.quality import UpstreamDataError
+
+
+def test_narrow_mapped_stream_survives_coarse_terrain_sampling():
+    mask = np.zeros((101, 101), dtype=np.uint8)
+    mask[:, 12] = 255  # Between centres at source columns 0, 25, 50, 75, 100.
+    grid = geospatial_mask_to_terrain_grid(mask, (0, 1, 0, 1), np.linspace(0, 1, 5), np.linspace(0, 1, 5))
+    assert np.all(grid[:, :2])
+    assert not np.any(grid[:, 2:])
+
+
+def test_water_evidence_must_cover_terrain_extent():
+    with pytest.raises(ValueError, match="cover"):
+        geospatial_mask_to_terrain_grid(np.zeros((10, 10)), (0, 1, 0, 1), np.linspace(0, 2, 5), np.linspace(0, 1, 5))
 
 
 def test_blank_imagery_is_rejected():

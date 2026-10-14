@@ -281,12 +281,21 @@ async def test_contour_upload_api_and_assignment_alias(client):
     assert not any("Contour-workflow pond dimensions" in note for note in payload["quality"]["warnings"])
     assert payload["water_screening"]["status"] == "applied"
 
-    alias_response = await client.post(
-        "/api/analyzeContour",
-        files={"contour_map": ("terrain.kml", synthetic_kml())},
-    )
-    assert alias_response.status_code == 200
-    assert alias_response.json()["analysis_status"] == "complete"
+    for route in ("/api/analyze-contour", "/api/analyzeContour", "/api/findCatchment"):
+        alias_response = await client.post(
+            route, files={"contour_map": ("terrain.kml", synthetic_kml())},
+        )
+        assert alias_response.status_code == 200
+        assert alias_response.json()["analysis_status"] == "complete"
+
+    for option in payload["candidate_options"]:
+        selected = await client.post(
+            "/api/analyze-contour", files=files,
+            data={"selection_mode": "point", "selected_lat": option["lat"], "selected_lng": option["lng"]},
+        )
+        assert selected.status_code == 200
+        assert selected.json()["catchment"]["cell_count"] >= 3
+        assert len(selected.json()["catchment"]["boundary"]) >= 3
 
 
 @pytest.mark.anyio

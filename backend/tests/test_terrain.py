@@ -11,6 +11,7 @@ import pytest
 from services.quality import AnalysisValidationError
 from services.terrain import (
     calculate_runoff,
+    _frustum_geometry,
     d8_flow_direction,
     delineate_catchment,
     fill_depressions,
@@ -129,6 +130,11 @@ class TestRunoffCalculation:
 
 class TestPondDimensions:
     """Test pond dimension recommendation."""
+
+    def test_rectangular_side_slopes_match_exact_prismoidal_volume(self):
+        # Bottom 10x20, middle 16x26, top 22x32, depth 3, slope 2H:1V.
+        expected = 3 / 6 * (200 + 4 * 416 + 704)
+        assert _frustum_geometry(10, 3, 2, 2)["volume"] == pytest.approx(expected)
 
     def test_small_volume(self):
         """Small volumes preserve the configured capture target."""

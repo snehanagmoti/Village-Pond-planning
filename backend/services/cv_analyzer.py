@@ -421,26 +421,31 @@ def geospatial_mask_to_terrain_grid(
     latitudes: np.ndarray,
     longitudes: np.ndarray,
 ) -> np.ndarray:
-    """Sample a north-up geospatial raster onto south-to-north terrain axes."""
+    """Conservatively aggregate water over each terrain cell's raster footprint."""
     if mask is None or mask.ndim != 2 or len(latitudes) < 3 or len(longitudes) < 3:
         raise ValueError("A two-dimensional mask and valid terrain axes are required")
     lat_min, lat_max, lng_min, lng_max = bounds
     if lat_max <= lat_min or lng_max <= lng_min:
         raise ValueError("Imagery bounds are invalid")
     rows, cols = mask.shape
-    sampled = np.zeros((len(latitudes), len(longitudes)), dtype=bool)
-    x_indices = np.rint(
-        (np.asarray(longitudes) - lng_min) / (lng_max - lng_min) * (cols - 1)
-    ).astype(int)
-    y_indices = np.rint(
-        (lat_max - np.asarray(latitudes)) / (lat_max - lat_min) * (rows - 1)
-    ).astype(int)
-    valid_x = (x_indices >= 0) & (x_indices < cols)
-    valid_y = (y_indices >= 0) & (y_indices < rows)
-    for terrain_row, (source_row, row_valid) in enumerate(zip(y_indices, valid_y, strict=False)):
-        if row_valid:
-            sampled[terrain_row, valid_x] = mask[source_row, x_indices[valid_x]] > 0
-    return sampled
+    x = (np.asarray(longitudes) - lng_min) / (lng_max - lng_min) * (cols - 1)
+    y = (lat_max - np.asarray(latitudes)) / (lat_max - lat_min) * (rows - 1)
+    if x.min() < -1e-6 or x.max() > cols - 1 + 1e-6 or y.min() < -1e-6 or y.max() > rows - 1 + 1e-6:
+        raise ValueError("Water evidence does not cover the complete terrain grid")
+    # Any intersecting source pixel excludes the cell. Nearest-neighbour
+    # sampling could completely erase a thin stream between grid centres.
+    half_x = float(np.max(np.abs(np.diff(x)))) / 2 + 0.5
+    half_y = float(np.max(np.abs(np.diff(y)))) / 2 + 0.5
+    left = np.clip(np.floor(x - half_x).astype(int), 0, cols)
+    right = np.clip(np.ceil(x + half_x).astype(int) + 1, 0, cols)
+    top = np.clip(np.floor(y - half_y).astype(int), 0, rows)
+    bottom = np.clip(np.ceil(y + half_y).astype(int) + 1, 0, rows)
+    integral = cv2.integral((mask > 0).astype(np.uint8))
+    counts = (
+        integral[bottom[:, None], right] - integral[top[:, None], right]
+        - integral[bottom[:, None], left] + integral[top[:, None], left]
+    )
+    return counts > 0
 
 
 def buffer_terrain_exclusion(

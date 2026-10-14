@@ -430,7 +430,13 @@ def _frustum_geometry(bottom_width: float, depth: float, ratio: float, slope: fl
     top_length = bottom_length + 2 * slope * depth
     bottom_area = bottom_width * bottom_length
     top_area = top_width * top_length
-    volume = depth / 3.0 * (bottom_area + top_area + math.sqrt(bottom_area * top_area))
+    # Equal side slopes add the same width to both dimensions, so rectangular
+    # sections are not similar. Integrate (width + 2*s*z)*(length + 2*s*z).
+    volume = (
+        bottom_area * depth
+        + slope * (bottom_width + bottom_length) * depth**2
+        + (4.0 / 3.0) * slope**2 * depth**3
+    )
     return {
         "volume": volume,
         "bottom_width": bottom_width,
