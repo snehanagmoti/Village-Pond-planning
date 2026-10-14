@@ -193,6 +193,25 @@ async def analyze_contour_upload(
         except Exception as exc:
             imagery_error = exc
 
+    # Fail closed: the assignment forbids selecting an existing water body or
+    # river.  Returning a pond point without the independent imagery exclusion
+    # would silently weaken that requirement.
+    if imagery_result is None or land_result is None or land_result.water_mask is None:
+        rainfall_task.cancel()
+        await asyncio.gather(rainfall_task, return_exceptions=True)
+        message = (
+            imagery_error.message
+            if isinstance(imagery_error, UpstreamDataError)
+            else "Satellite water screening failed"
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "water_screening_unavailable",
+                "message": f"Water and river exclusion could not be verified: {message}",
+            },
+        )
+
     try:
         result = await asyncio.to_thread(
             analyze_contour_file,
@@ -448,6 +467,8 @@ async def analyze_location(payload: AnalysisRequest, http_request: Request) -> A
             candidate_polygon_raw,
             candidate_land_mask=candidate_land_grid,
             candidate_exclusion_mask=water_exclusion_grid,
+            candidate_river_setback_m=settings.contour_modeled_channel_setback_m,
+            major_drainage_fraction=settings.contour_major_drainage_fraction,
         )
     except AnalysisValidationError as exc:
         raise HTTPException(

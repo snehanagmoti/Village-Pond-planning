@@ -153,6 +153,12 @@ class Settings:
         self.contour_detected_water_setback_m = _float(
             "CONTOUR_DETECTED_WATER_SETBACK_M", 60.0, 0.0
         )
+        self.contour_modeled_channel_setback_m = _float(
+            "CONTOUR_MODELED_CHANNEL_SETBACK_M", 60.0, 0.0
+        )
+        self.contour_major_drainage_fraction = min(
+            0.5, _float("CONTOUR_MAJOR_DRAINAGE_FRACTION", 0.08, 0.001)
+        )
         self.contour_candidate_option_count = min(
             5, _int("CONTOUR_CANDIDATE_OPTION_COUNT", 3, 1)
         )

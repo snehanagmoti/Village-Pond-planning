@@ -8,6 +8,7 @@ catchment delineation, runoff, and pond sizing.
 import numpy as np
 import pytest
 
+from services.quality import AnalysisValidationError
 from services.terrain import (
     calculate_runoff,
     d8_flow_direction,
@@ -242,3 +243,26 @@ class TestProductionHydrology:
         assert result["pond_location"]["boundary_distance_m"] >= 75.0
         assert result["drainage_path"][0]["lat"] == pytest.approx(result["pond_location"]["lat"])
         assert result["drainage_path"][-1]["lat"] == pytest.approx(result["outlet_location"]["lat"])
+
+    def test_user_cannot_select_a_modeled_major_drainage_channel(self):
+        rows = cols = 81
+        row_slope = np.arange(rows, dtype=float)[:, None] * 2.0
+        valley = np.abs(np.arange(cols, dtype=float) - cols // 2)[None, :] * 2.0
+        dem = row_slope + valley
+        latitudes = np.linspace(18.0, 18.02, rows)
+        longitudes = np.linspace(73.0, 73.02, cols)
+
+        with pytest.raises(AnalysisValidationError, match="modeled-major-drainage"):
+            run_terrain_analysis(
+                dem,
+                latitudes,
+                longitudes,
+                candidate_land_mask=np.ones(dem.shape, dtype=bool),
+                analysis_mask=np.ones(dem.shape, dtype=bool),
+                candidate_boundary_setback_m=0.0,
+                selection_mode="point",
+                selected_point={
+                    "lat": float(latitudes[10]),
+                    "lng": float(longitudes[cols // 2]),
+                },
+            )

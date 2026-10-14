@@ -183,9 +183,29 @@ def analyze_satellite_image(image: np.ndarray) -> LandCoverResult:
 
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     vegetation = cv2.inRange(hsv, np.array([32, 35, 25]), np.array([95, 255, 245]))
-    water_blue = cv2.inRange(hsv, np.array([90, 25, 15]), np.array([140, 255, 210]))
-    water_dark = cv2.inRange(hsv, np.array([0, 0, 0]), np.array([180, 55, 70]))
+    water_blue = cv2.inRange(hsv, np.array([88, 20, 12]), np.array([145, 255, 220]))
+    water_dark = cv2.inRange(hsv, np.array([0, 0, 0]), np.array([180, 255, 48]))
+
+    # Rivers in agricultural imagery are frequently dark teal, muddy or partly
+    # shaded rather than strongly blue.  Add conservative channel-oriented
+    # tests in BGR space instead of relying on hue alone.  False positives are
+    # preferable here: this mask is a hard *exclusion*, never evidence that a
+    # site is suitable.
+    blue, green, red = cv2.split(image)
+    cool_channel = (
+        (blue.astype(np.int16) >= red.astype(np.int16) + 8)
+        & (green.astype(np.int16) >= red.astype(np.int16) + 4)
+        & (blue >= 30)
+        & (grayscale <= 155)
+    )
+    cool_channel = cool_channel.astype(np.uint8) * 255
     water = cv2.bitwise_or(water_blue, water_dark)
+    water = cv2.bitwise_or(water, cool_channel)
+    water = cv2.morphologyEx(
+        water,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+    )
 
     brown = cv2.inRange(hsv, np.array([5, 35, 45]), np.array([32, 255, 245]))
     sand = cv2.inRange(hsv, np.array([15, 18, 110]), np.array([38, 170, 255]))

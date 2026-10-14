@@ -499,6 +499,8 @@ def analyze_contour_file(
             analysis_mask=analysis_mask,
             candidate_exclusion_mask=water_exclusion,
             candidate_boundary_setback_m=settings.contour_candidate_boundary_setback_m,
+            candidate_river_setback_m=settings.contour_modeled_channel_setback_m,
+            major_drainage_fraction=settings.contour_major_drainage_fraction,
             selection_mode=selection_mode,
             selected_point=selected_point,
             selected_region=selected_region,
@@ -568,11 +570,11 @@ def analyze_contour_file(
                 if pond["water_distance_m"] is not None else None
             ),
             "selection_method": (
-                "User-selected point snapped to the terrain grid and accepted only after boundary, outlet and detected-water checks"
+                "User-selected point snapped to the terrain grid and accepted only after boundary, outlet, water and major-drainage checks"
                 if terrain["selection"]["mode"] == "point"
                 else "Highest multi-criteria terrain score inside the user-drawn search region"
                 if terrain["selection"]["mode"] == "region"
-                else "Highest spatially separated multi-criteria terrain score after boundary, outlet and detected-water checks"
+                else "Highest spatially separated multi-criteria terrain score after boundary, outlet, water and major-drainage checks"
             ),
         },
         "candidate_options": [
@@ -611,13 +613,13 @@ def analyze_contour_file(
         "eligible_candidate_area_sqm": round(float(terrain["candidate_area_sqm"]), 2),
         "water_screening": {
             "status": "applied" if water_exclusion is not None else "unavailable",
-            "method": "RGB/HSV satellite water classification with hard terrain-grid exclusion",
+            "method": "Conservative satellite water classification plus buffered DEM-derived major-drainage exclusion",
             "detected_water_ratio": (
                 round(detected_water_ratio, 5) if detected_water_ratio is not None else None
             ),
             "exclusion_buffer_m": round(float(water_exclusion_buffer_m), 1),
             "message": (
-                "Detected water was excluded before candidate scoring; non-detection is not proof that a river is absent."
+                "Detected water and modeled major-drainage corridors were excluded before candidate scoring."
                 if water_exclusion is not None
                 else "No valid satellite water mask was available; hydrography and field verification are required."
             ),

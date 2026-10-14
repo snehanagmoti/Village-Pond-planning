@@ -281,6 +281,21 @@ async def test_contour_upload_api_and_assignment_alias(client):
 
 
 @pytest.mark.anyio
+async def test_contour_api_fails_closed_when_water_screening_is_unavailable(monkeypatch, client):
+    async def unavailable_imagery(*_args, **_kwargs):
+        raise UpstreamDataError("satellite_imagery", "test imagery outage")
+
+    monkeypatch.setattr(pond_planner, "download_satellite_mosaic", unavailable_imagery)
+    response = await client.post(
+        "/api/analyze-contour",
+        files={"contour_file": ("terrain.kml", synthetic_kml())},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "water_screening_unavailable"
+
+
+@pytest.mark.anyio
 async def test_contour_api_recomputes_for_manual_point_and_region(client):
     automatic = await client.post(
         "/api/analyze-contour",

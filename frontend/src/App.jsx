@@ -567,7 +567,7 @@ export default function App() {
                 Suitability: {numberOrDash(option.suitability_score, 1)} / 100<br />
                 Contributing area: {numberOrDash(option.contributing_area_hectares, 2)} ha<br />
                 Local slope: {numberOrDash(option.local_slope_percent, 1)}%<br />
-                Water clearance: {option.water_distance_m == null ? 'Not available' : `${numberOrDash(option.water_distance_m, 0)} m`}
+                Water/channel clearance: {option.water_distance_m == null ? 'Not available' : `${numberOrDash(option.water_distance_m, 0)} m`}
                 {option.selected && <><br />Expected annual runoff: {numberOrDash(contourAnalysis.runoff_stats?.estimated_volume_m3, 0)} m³/year<br />Storage capacity: {numberOrDash(contourAnalysis.pond?.capacity_m3, 0)} m³</>}
               </Popup>
             </Marker>
@@ -741,7 +741,7 @@ export default function App() {
             <section className="result-card contour-selection-tools" aria-labelledby="contour-selection-heading">
               <p className="eyebrow">Interactive siting</p>
               <h2 id="contour-selection-heading">Choose how the pond point is selected</h2>
-              <p>The server always re-checks the study boundary, outlet, contributing flow and detected-water buffer. A map click never bypasses those safeguards.</p>
+              <p>The server always re-checks the study boundary, outlet, contributing flow, detected-water buffer and modeled major-drainage buffer. A map click never bypasses those safeguards.</p>
               <div className="selection-mode-grid" role="group" aria-label="Contour candidate selection mode">
                 <button type="button" aria-pressed={contourSelectionMode === 'automatic'} onClick={() => chooseContourSelectionMode('automatic')}>
                   <strong>Automatic</strong><span>Best ranked option</span>
@@ -817,7 +817,7 @@ export default function App() {
                       <div><dt>Upstream area</dt><dd>{numberOrDash(option.contributing_area_hectares, 2)} ha</dd></div>
                       <div><dt>Local slope</dt><dd>{numberOrDash(option.local_slope_percent, 1)}%</dd></div>
                       <div><dt>Boundary clearance</dt><dd>{numberOrDash(option.boundary_distance_m, 0)} m</dd></div>
-                      <div><dt>Water clearance</dt><dd>{option.water_distance_m == null ? 'Unavailable' : `${numberOrDash(option.water_distance_m, 0)} m`}</dd></div>
+                      <div><dt>Water/channel clearance</dt><dd>{option.water_distance_m == null ? 'Unavailable' : `${numberOrDash(option.water_distance_m, 0)} m`}</dd></div>
                     </dl>
                     {option.selected
                       ? <span className="selected-option-label">Selected for this result</span>
@@ -967,7 +967,7 @@ export default function App() {
                       <dl>
                         <div><dt>Upstream area</dt><dd>{numberOrDash(option.contributing_area_hectares, 2)} ha</dd></div>
                         <div><dt>Local slope</dt><dd>{numberOrDash(option.local_slope_percent, 1)}%</dd></div>
-                        <div><dt>Water clearance</dt><dd>{option.water_distance_m == null ? 'Unavailable' : `${numberOrDash(option.water_distance_m, 0)} m`}</dd></div>
+                        <div><dt>Water/channel clearance</dt><dd>{option.water_distance_m == null ? 'Unavailable' : `${numberOrDash(option.water_distance_m, 0)} m`}</dd></div>
                       </dl>
                       {option.selected && <span className="selected-option-label">Used for this result</span>}
                     </article>

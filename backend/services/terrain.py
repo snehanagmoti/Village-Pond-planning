@@ -509,6 +509,8 @@ def run_terrain_analysis(
     candidate_land_mask: Optional[np.ndarray] = None,
     candidate_exclusion_mask: Optional[np.ndarray] = None,
     candidate_boundary_setback_m: float = 75.0,
+    candidate_river_setback_m: float = 60.0,
+    major_drainage_fraction: float = 0.08,
     selection_mode: str = "automatic",
     selected_point: Optional[Dict[str, float]] = None,
     selected_region: Optional[List[Dict[str, float]]] = None,
@@ -549,11 +551,33 @@ def run_terrain_analysis(
         land_mask = np.asarray(candidate_land_mask, dtype=bool)
         if land_mask.shape != dem.shape:
             raise AnalysisValidationError("Candidate land mask must match the DEM")
-    exclusions = np.zeros(dem.shape, dtype=bool)
+    water_exclusions = np.zeros(dem.shape, dtype=bool)
     if candidate_exclusion_mask is not None:
-        exclusions = np.asarray(candidate_exclusion_mask, dtype=bool)
-        if exclusions.shape != dem.shape:
+        water_exclusions = np.asarray(candidate_exclusion_mask, dtype=bool)
+        if water_exclusions.shape != dem.shape:
             raise AnalysisValidationError("Candidate exclusion mask must match the DEM")
+
+    # A high-accumulation D8 corridor is a conservative proxy for a river or
+    # established drainage channel.  It complements the satellite colour mask,
+    # which can miss muddy, shaded, narrow or vegetation-covered water.  Never
+    # place a pond candidate on the corridor or within its configured setback.
+    valid_cells = int(np.sum(valid_mask))
+    channel_threshold = max(25, int(math.ceil(valid_cells * max(0.0, major_drainage_fraction))))
+    modeled_channel = valid_mask & (accumulation >= channel_threshold)
+    channel_buffer_cells = int(
+        math.ceil(max(0.0, candidate_river_setback_m) / math.sqrt(cell_area_sqm))
+    )
+    if channel_buffer_cells > 0 and np.any(modeled_channel):
+        channel_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (channel_buffer_cells * 2 + 1, channel_buffer_cells * 2 + 1),
+        )
+        river_exclusions = cv2.dilate(
+            modeled_channel.astype(np.uint8), channel_kernel
+        ).astype(bool)
+    else:
+        river_exclusions = modeled_channel.copy()
+    exclusions = water_exclusions | river_exclusions
 
     # A candidate must lie inside the supplied analysis/land evidence, outside
     # detected water, away from the model boundary, and upstream of an outlet.
@@ -625,8 +649,10 @@ def run_terrain_analysis(
         else:
             if not land_mask[row, col]:
                 reasons.append("outside the candidate land evidence")
-            if exclusions[row, col]:
+            if water_exclusions[row, col]:
                 reasons.append("inside the detected-water exclusion buffer")
+            if river_exclusions[row, col]:
+                reasons.append("inside the modeled-major-drainage exclusion buffer")
             if flow_direction[row, col] < 0:
                 reasons.append("on a hydrologic outlet or terminal cell")
             if boundary_distance_m[row, col] < max(0.0, candidate_boundary_setback_m):
@@ -781,6 +807,8 @@ def run_terrain_analysis(
         },
         "drainage_path": drainage_path,
         "candidate_boundary_setback_m": max(0.0, float(candidate_boundary_setback_m)),
+        "candidate_river_setback_m": max(0.0, float(candidate_river_setback_m)),
+        "modeled_channel_cell_count": int(np.sum(modeled_channel)),
         "warnings": warnings,
         "elevation_stats": {
             "min_elevation": round(float(np.min(dem)), 1),
