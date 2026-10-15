@@ -10,8 +10,8 @@ import pytest
 
 from services.quality import AnalysisValidationError
 from services.terrain import (
-    calculate_runoff,
     _frustum_geometry,
+    calculate_runoff,
     d8_flow_direction,
     delineate_catchment,
     fill_depressions,

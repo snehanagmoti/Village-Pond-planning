@@ -4,7 +4,7 @@ import pytest
 
 from main import app
 from routers import pond_planner
-from services.cv_analyzer import LandCoverResult, SatelliteMosaic, MappedHydrography
+from services.cv_analyzer import LandCoverResult, MappedHydrography, SatelliteMosaic
 from services.elevation import ElevationGrid
 from services.quality import SourceInfo, UpstreamDataError
 from services.rainfall import RainfallResult
