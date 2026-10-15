@@ -2,16 +2,15 @@
 
 ## Ready
 
-- Final report: `output/pdf/Phase_3_Final_Technical_Report.pdf` (9 pages, supplied template, college deployment and measured results included).
-- GitHub: `https://github.com/snehanagmoti/Village-Pond-planning`.
-- Frontend: `http://10.1.75.53:3238/` (college network).
+- Final report: `output/pdf/Phase_3_Final_Technical_Report.pdf` (10 pages, supplied ACM template, regenerated 15 October 2026 with the water-exclusion results).
+- GitHub: `https://github.com/snehanagmoti/Village-Pond-planning` (CI passing).
+- Frontend: `http://10.1.75.53:3238/` (college network); running commit `c641fc2`, verified 15 October.
 - Backend upload: `POST http://10.1.75.53:3238/api/analyze-contour`, field `contour_map`.
 - Swagger: `http://10.1.75.53:3238/docs`.
-- Backend tests: 76 passed locally and on system 2 (33.84 seconds remotely in the 27 September recheck), including independent hydrology reference checks.
-- Frontend tests: 14 passed across six files; selection-preserving retry fix deployed.
-- Frontend lint and production build: passed.
-- Contour workflow: KML/KMZ, point and region API checks passed; fresh manual desktop/mobile results and screenshots included. Live workflow has earlier successful evidence, but the latest run and retry were incomplete because satellite imagery was unavailable.
-- Two concurrent sample-contour requests completed; 15 health checks passed while they ran. See `DEV_MACHINE_VERIFICATION.md` for exact timings and resource limits.
+- Backend tests: 85 passed; frontend 14 passed; lint, build and GitHub CI passed (commit `c641fc2`).
+- Supplied KML through the college URL: complete in 6.2 s; 50.90 ha catchment, 195,470 m3/yr runoff, 156,376 m3 storage; three options on land, each re-selectable; region selection and 422 error cases checked.
+- Two concurrent KML uploads (5.8-5.9 s, identical results) and ten health probes (max 0.354 s). See `DEV_MACHINE_VERIFICATION.md` (15 October section).
+- Live analysis at 21.244025, 81.288 (2 km): HTTP 200, `degraded` (fallback elevation/rainfall), one eligible site.
 
 ## Must be completed before pressing “Mark as done”
 
@@ -19,7 +18,7 @@
 - Verify the public YouTube URL while signed out.
 - Add the PDF, GitHub URL, frontend URL and YouTube URL to the Classroom submission.
 - Check the college frontend `http://10.1.75.53:3238/` immediately before the demo. Intermittent network connection timeouts were observed.
-- Recheck live-source availability before the demo: the latest 27 September run and retry could not produce a pond recommendation because imagery was unavailable. Do not treat the earlier successful result as a current pass.
+- If system 2 is unreachable before the demo, SSH in and run `sh "$HOME/pond-phase3-release/start_lab_service.sh"` (the container restart on/before 15 October stopped the service).
 - Open every submitted link once from an incognito/private window.
 
 ## Allotted systems

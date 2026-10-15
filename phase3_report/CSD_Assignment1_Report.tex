@@ -116,14 +116,14 @@ The main routes are summarized in Table~\ref{tab:endpoints}. The upload route ac
 \end{table}
 
 \subsection{Frontend and Visualization}
-The interface offers Live Analysis and Contour Upload workspaces. A collapsible result panel leaves the map available for inspection. Users can select a location by search, coordinates or map interaction, set the radius, upload KML/KMZ, choose automatic/point/region contour selection, and switch among ranked options. Leaflet overlays show the study radius, source contours, reconstructed elevation surface, candidate land, water exclusion, catchment boundary, drainage path and numbered pond sites. Result cards present catchment, rainfall, runoff, capacity, depth, dimensions, score and source status in plain language. Figure~\ref{fig:ui} shows the verified live result.
+The interface offers Live Analysis and Contour Upload workspaces. A collapsible result panel leaves the map available for inspection. Users can select a location by search, coordinates or map interaction, set the radius, upload KML/KMZ, choose automatic/point/region contour selection, and switch among ranked options. Leaflet overlays show the study radius, source contours, reconstructed elevation surface, candidate land, water exclusion, catchment boundary, drainage path and numbered pond sites. Result cards present catchment, rainfall, runoff, capacity, depth, dimensions, score and source status in plain language. Figure~\ref{fig:ui} shows the deployed result panel with the river and water safeguard and the ranked options.
 
 \begin{figure}[h]
   \centering
-  \includegraphics[width=0.98\linewidth]{live-results.png}
-  \caption{Deployed live-analysis interface with catchment, candidate land and ranked sites.}
+  \includegraphics[width=0.55\linewidth]{options-oct15.png}
+  \caption{Deployed result panel (15 October 2026): water safeguard applied with a 60 m buffer, and the ranked, spatially separated pond options with their upstream area and water/channel clearance.}
   \label{fig:ui}
-  \Description{Satellite map with a blue watershed, yellow candidate land, three numbered pond options and a source-aware result panel.}
+  \Description{Result panel listing the river and water safeguard status, a 60 m exclusion buffer and ranked pond options with scores, upstream areas and clearances.}
 \end{figure}
 
 \subsection{Database and Storage}
@@ -176,20 +176,13 @@ The deployed live workflow was re-verified on 15 October 2026 at 21.244025$^\cir
 
 \begin{figure}[h]
   \centering
-  \includegraphics[width=0.98\linewidth]{contour-final-desktop.png}
-  \caption{Fresh allotted-system contour result: coloured DEM, catchment, drainage path and three ranked options, with 352.95 ha catchment, 1,355,475 m$^3$/year runoff and 1,084,380 m$^3$ storage displayed on the map.}
+  \includegraphics[width=0.62\linewidth]{contour-oct15.png}
+  \caption{Allotted-system contour result for \texttt{contours\_1m.kml} (15 October 2026): coloured DEM, catchment, drainage path to the outlet and three ranked options on land east of the river, with the selected pond's 50.9 ha catchment, 195,470 m$^3$/year runoff and 156,376 m$^3$ storage shown on the map.}
   \label{fig:results}
   \Description{A coloured interpolated elevation surface on satellite imagery with contour lines, a catchment boundary, drainage path and three ranked candidate markers.}
 \end{figure}
 
 \subsection{Performance and Verification}
-\begin{figure}[h]
-  \centering
-  \includegraphics[width=0.68\linewidth]{region-final-desktop.png}\hfill
-  \includegraphics[width=0.27\linewidth]{region-final-mobile.png}
-  \caption{User-drawn search region after recomputation, shown at desktop and mobile widths. The changed site has 240.69 ha catchment, 924,346 m$^3$/year runoff and 739,477 m$^3$ proposed storage. The dashed search polygon restricts pond placement, not the full upstream catchment.}
-  \Description{Desktop and mobile screenshots of the same selected-region analysis, showing the search polygon, three candidate markers, catchment boundary and numerical map summary.}
-\end{figure}
 Tests cover Priority-Flood/D8 behavior, independent reference-walk checks of flow accumulation and catchment membership, point/region selection, water exclusion, contour parsing, upload limits, source failures, runoff/geometry constraints and map-result presentation. On 15 October, measured from a laptop on the college network, the supplied KML returned in 6.2 s through the college HTTP endpoint, repeated point and region requests in 2.0--2.2 s, and a live request in 3.2 s; these timings benefit from warm tile caches on the server. These are functional and numerical-consistency checks, not validation against a surveyed watershed.
 
 On the allotted container's 512 MiB memory and one-CPU quota (read from its cgroup limits), two simultaneous supplied-KML uploads returned HTTP 200 in 5.77 s and 5.91 s with results identical to the sequential run, while ten readiness probes all succeeded (maximum 0.354 s). An independent multiplication of area, rainfall and coefficient agreed with every reported runoff volume. This bounded concurrency test supports a small demonstration workload; it is not a sustained saturation benchmark or a high-availability claim.
