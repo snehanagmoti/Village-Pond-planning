@@ -36,6 +36,11 @@ def _flag(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).strip().casefold() in {"1", "true", "yes", "on"}
 
 
+# Default OpenTelemetry buckets (0, 5, 10, 25 ... 10000) suit milliseconds; analyses take
+# 0.1-60 s, so second-scale boundaries are needed for meaningful percentiles.
+_SECONDS_BUCKETS = [0.01, 0.05, 0.1, 0.25, 0.5, 1, 1.5, 2, 3, 5, 10, 30, 60]
+
+
 class _Instruments:
     """Custom application metrics (created lazily so the no-op path stays free)."""
 
@@ -48,18 +53,22 @@ class _Instruments:
         self.duration = meter.create_histogram(
             "pond.analysis.duration", unit="s",
             description="End-to-end analysis time per workflow",
+            explicit_bucket_boundaries_advisory=_SECONDS_BUCKETS,
         )
         self.stage_duration = meter.create_histogram(
             "pond.pipeline.stage.duration", unit="s",
             description="Time spent in each terrain/hydrology pipeline stage",
+            explicit_bucket_boundaries_advisory=_SECONDS_BUCKETS,
         )
         self.catchment_area = meter.create_histogram(
             "pond.catchment.area", unit="ha",
             description="Catchment area of the selected pond point",
+            explicit_bucket_boundaries_advisory=[1, 5, 10, 25, 50, 75, 100, 200, 500, 1000],
         )
         self.runoff_volume = meter.create_histogram(
             "pond.runoff.volume", unit="m3",
             description="Estimated annual runoff volume (C x P x A)",
+            explicit_bucket_boundaries_advisory=[1e3, 1e4, 5e4, 1e5, 2e5, 5e5, 1e6, 5e6],
         )
         self.source_failures = meter.create_counter(
             "pond.external_source.failures", unit="{failure}",
