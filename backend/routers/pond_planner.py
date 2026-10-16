@@ -30,6 +30,7 @@ from models.schemas import (
     SourceMetadata,
     VillageSearchResult,
 )
+from observability import mark_error, record_result, record_source_failure, span
 from services.contour_analyzer import (
     ContourFileError,
     analyze_contour_file,
@@ -59,6 +60,19 @@ from services.terrain import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _traced(name: str, awaitable, **attributes):
+    """Run an external-source download inside its own span; count failures."""
+    with span(name, **attributes):
+        try:
+            return await awaitable
+        except Exception as exc:
+            reason = exc.message if isinstance(exc, UpstreamDataError) else type(exc).__name__
+            mark_error(exc, reason)
+            record_source_failure(name.removeprefix("external."), reason)
+            logger.warning("external_source_failed source=%s reason=%s", name, reason)
+            raise
 settings = get_settings()
 router = APIRouter()
 
@@ -172,16 +186,18 @@ async def analyze_contour_upload(
             detail={"code": "invalid_contour_file", "message": str(exc)},
         ) from exc
 
-    rainfall_task = asyncio.create_task(get_rainfall_data(center_lat, center_lng))
+    rainfall_task = asyncio.create_task(_traced("external.rainfall", get_rainfall_data(center_lat, center_lng)))
     imagery_task = None
     hydrography_task = None
     if coverage_radius_km <= settings.analysis_max_radius_km:
-        imagery_task = asyncio.create_task(
-            download_satellite_mosaic(center_lat, center_lng, coverage_radius_km)
-        )
-        hydrography_task = asyncio.create_task(
-            download_mapped_hydrography(center_lat, center_lng, coverage_radius_km)
-        )
+        imagery_task = asyncio.create_task(_traced(
+            "external.satellite_imagery",
+            download_satellite_mosaic(center_lat, center_lng, coverage_radius_km),
+        ))
+        hydrography_task = asyncio.create_task(_traced(
+            "external.mapped_hydrography",
+            download_mapped_hydrography(center_lat, center_lng, coverage_radius_km),
+        ))
 
     imagery_result = None
     land_result = None
@@ -399,6 +415,19 @@ async def analyze_contour_upload(
     if pond is None or annual_rainfall is None or coefficient is None:
         result["analysis_status"] = "incomplete"
         result["quality"]["status"] = "incomplete"
+    record_result(
+        "contour", mode, result["analysis_status"],
+        round(result["catchment"]["area_sqm"] / 10_000, 3),
+        round(volume, 2) if volume is not None else None,
+        candidate_count=len(result.get("candidate_options", [])),
+        pond_lat=result["pond_location"]["lat"], pond_lng=result["pond_location"]["lng"],
+        capacity_m3=pond.capacity_m3 if pond else None,
+    )
+    logger.info(
+        "contour_analysis_complete status=%s mode=%s catchment_ha=%.2f runoff_m3=%s candidates=%d",
+        result["analysis_status"], mode, result["catchment"]["area_sqm"] / 10_000,
+        f"{volume:.0f}" if volume is not None else "n/a", len(result.get("candidate_options", [])),
+    )
     return ContourAnalysisResponse(**result)
 
 
@@ -414,18 +443,22 @@ async def analyze_location(payload: AnalysisRequest, http_request: Request) -> A
             },
         )
 
-    elevation_task = asyncio.create_task(
-        fetch_elevation_grid(payload.center.lat, payload.center.lng, payload.radius_km)
-    )
-    imagery_task = asyncio.create_task(
-        download_satellite_mosaic(payload.center.lat, payload.center.lng, payload.radius_km)
-    )
-    hydrography_task = asyncio.create_task(
-        download_mapped_hydrography(payload.center.lat, payload.center.lng, payload.radius_km)
-    )
-    rainfall_task = asyncio.create_task(
-        get_rainfall_data(payload.center.lat, payload.center.lng)
-    )
+    elevation_task = asyncio.create_task(_traced(
+        "external.elevation",
+        fetch_elevation_grid(payload.center.lat, payload.center.lng, payload.radius_km),
+    ))
+    imagery_task = asyncio.create_task(_traced(
+        "external.satellite_imagery",
+        download_satellite_mosaic(payload.center.lat, payload.center.lng, payload.radius_km),
+    ))
+    hydrography_task = asyncio.create_task(_traced(
+        "external.mapped_hydrography",
+        download_mapped_hydrography(payload.center.lat, payload.center.lng, payload.radius_km),
+    ))
+    rainfall_task = asyncio.create_task(_traced(
+        "external.rainfall",
+        get_rainfall_data(payload.center.lat, payload.center.lng),
+    ))
     try:
         elevation_result = await elevation_task
     except Exception as elevation_error:
@@ -631,6 +664,18 @@ async def analyze_location(payload: AnalysisRequest, http_request: Request) -> A
         peak_method="Rational Method using configured design intensity" if peak_discharge is not None else None,
     )
 
+    record_result(
+        "live", "automatic", analysis_status,
+        round(terrain["catchment_area_sqm"] / 10_000, 3),
+        round(volume, 2) if volume is not None else None,
+        candidate_count=len(terrain.get("candidate_options", [])),
+        capacity_m3=pond.capacity_m3 if pond else None,
+    )
+    logger.info(
+        "live_analysis_complete status=%s catchment_ha=%.2f runoff_m3=%s pond=%s",
+        analysis_status, terrain["catchment_area_sqm"] / 10_000,
+        f"{volume:.0f}" if volume is not None else "n/a", "yes" if pond else "no",
+    )
     persistence = PersistenceStatus(status="disabled", message="History storage is disabled")
     if settings.history_enabled:
         values = {

@@ -16,6 +16,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from config import get_settings
 from models.database import check_database
 from models.schemas import HealthResponse
+from observability import record_request, setup_observability, shutdown_observability
 from routers import pond_planner
 from services.http_client import close_http_client
 
@@ -36,6 +37,7 @@ async def lifespan(_: FastAPI):
     yield
     await close_http_client()
     logger.info("application_stop")
+    shutdown_observability()
 
 
 app = FastAPI(
@@ -107,6 +109,14 @@ async def request_context(request: Request, call_next):
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     if request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
+    workflow = {
+        "/api/analyze": "live",
+        "/api/analyze-contour": "contour",
+        "/api/analyzeContour": "contour",
+        "/api/findCatchment": "contour",
+    }.get(request.url.path)
+    if workflow and request.method == "POST":
+        record_request(workflow, response.status_code, time.perf_counter() - started)
     logger.info(
         "request_complete request_id=%s method=%s path=%s status=%d duration_ms=%.1f",
         request_id,
@@ -119,6 +129,7 @@ async def request_context(request: Request, call_next):
 
 
 app.include_router(pond_planner.router, prefix="/api", tags=["Pond Planning"])
+setup_observability(app)
 
 
 @app.get("/health/live", response_model=HealthResponse, tags=["Health"])

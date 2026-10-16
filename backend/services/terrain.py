@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 
 from config import get_settings
+from observability import set_attributes, span
 from services.quality import AnalysisValidationError
 
 logger = logging.getLogger(__name__)
@@ -547,16 +548,22 @@ def run_terrain_analysis(
     )
     if valid_mask.shape != dem.shape or int(np.sum(valid_mask)) < 3:
         raise AnalysisValidationError("Analysis mask must match the DEM and contain valid cells")
-    filled, fill_depth = fill_depressions(dem)
-    flow_surface = resolve_flats(filled)
-    flow_direction = d8_flow_direction(flow_surface)
+    with span("terrain.priority_flood", cells=int(dem.size)):
+        filled, fill_depth = fill_depressions(dem)
+        set_attributes(filled_cells=int(np.sum(fill_depth > 1e-6)),
+                       max_fill_m=round(float(np.max(fill_depth)), 3))
+    with span("terrain.resolve_flats_d8"):
+        flow_surface = resolve_flats(filled)
+        flow_direction = d8_flow_direction(flow_surface)
     if analysis_mask is not None:
         # Cells on the supplied study boundary are possible outlets. Outside
         # cells must never contribute to a watershed inside that boundary.
         eroded = cv2.erode(valid_mask.astype(np.uint8), np.ones((3, 3), np.uint8))
         study_boundary = valid_mask & ~eroded.astype(bool)
         flow_direction[~valid_mask | study_boundary] = -1
-    accumulation = flow_accumulation(flow_direction)
+    with span("terrain.flow_accumulation"):
+        accumulation = flow_accumulation(flow_direction)
+        set_attributes(max_accumulation_cells=int(np.max(accumulation)))
 
     lat_cell_m = abs(float(lat_array[1] - lat_array[0])) * 111_320.0
     lng_cell_m = abs(float(lng_array[1] - lng_array[0])) * 111_320.0 * math.cos(math.radians(float(np.mean(lat_array))))
@@ -703,16 +710,18 @@ def run_terrain_analysis(
     if candidate_cells > 0:
         minimum_separation_m = max(100.0, 3.0 * math.sqrt(cell_area_sqm))
         ranked_scope = selection_scope if mode != "point" else candidate_mask
-        ranked_cells = _rank_candidate_cells(
-            ranked_scope,
-            suitability_score,
-            accumulation,
-            dem,
-            limit=max(1, min(5, int(candidate_limit))),
-            minimum_separation_m=minimum_separation_m,
-            lat_cell_m=lat_cell_m,
-            lng_cell_m=lng_cell_m,
-        )
+        with span("terrain.rank_candidates", eligible_cells=int(candidate_cells), mode=mode):
+            ranked_cells = _rank_candidate_cells(
+                ranked_scope,
+                suitability_score,
+                accumulation,
+                dem,
+                limit=max(1, min(5, int(candidate_limit))),
+                minimum_separation_m=minimum_separation_m,
+                lat_cell_m=lat_cell_m,
+                lng_cell_m=lng_cell_m,
+            )
+            set_attributes(ranked=len(ranked_cells))
         # Every displayed option must itself produce a valid contributing
         # catchment; otherwise selecting a shown alternative can fail later.
         def valid_candidate_catchment(cell: tuple[int, int]) -> bool:
@@ -793,8 +802,11 @@ def run_terrain_analysis(
     # no land candidate is available, retain the main outlet watershed so the
     # analysis still reports hydrology without inventing a pond location.
     catchment_row, catchment_col = selected_cell or (outlet_row, outlet_col)
-    catchment_mask = delineate_catchment(flow_direction, catchment_row, catchment_col) & valid_mask
-    catchment_cells = int(np.sum(catchment_mask))
+    with span("terrain.delineate_catchment", row=int(catchment_row), col=int(catchment_col)):
+        catchment_mask = delineate_catchment(flow_direction, catchment_row, catchment_col) & valid_mask
+        catchment_cells = int(np.sum(catchment_mask))
+        set_attributes(catchment_cells=catchment_cells,
+                       catchment_ha=round(catchment_cells * cell_area_sqm / 10_000, 3))
     if catchment_cells < 3:
         raise AnalysisValidationError("Computed watershed contains fewer than three cells")
     catchment_ratio = catchment_cells / int(np.sum(valid_mask))

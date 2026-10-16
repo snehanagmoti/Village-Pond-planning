@@ -23,6 +23,7 @@ import cv2
 import numpy as np
 
 from config import get_settings
+from observability import set_attributes, span
 from services.cv_analyzer import buffer_terrain_exclusion, geospatial_mask_to_terrain_grid
 from services.quality import AnalysisValidationError
 from services.terrain import run_terrain_analysis
@@ -459,8 +460,17 @@ def analyze_contour_file(
     water_exclusion_buffer_m: float = 60.0,
 ) -> dict:
     """Reconstruct terrain, rank sites, and delineate the selected catchment."""
-    dataset, input_format = parse_contour_document(document, filename)
-    dem, latitudes, longitudes, analysis_mask, grid = interpolate_contour_dem(dataset)
+    with span("contour.parse_kml", **{"file.bytes": len(document), "file.name": filename}):
+        dataset, input_format = parse_contour_document(document, filename)
+        set_attributes(contour_lines=len(dataset.lines), input_format=input_format)
+    with span("terrain.harmonic_interpolation"):
+        dem, latitudes, longitudes, analysis_mask, grid = interpolate_contour_dem(dataset)
+        set_attributes(
+            grid_rows=int(dem.shape[0]), grid_columns=int(dem.shape[1]),
+            cell_size_m=float(grid["cell_size_m"]),
+            iterations=int(grid["interpolation_iterations"]),
+            converged=bool(grid["interpolation_converged"]),
+        )
     study_boundary_source = "uploaded_polygon" if dataset.boundary else "derived_extent"
     if dataset.boundary:
         site_polygon = [
@@ -477,18 +487,21 @@ def analyze_contour_file(
     water_exclusion = None
     detected_water_ratio = None
     if water_mask is not None and water_bounds is not None:
-        water_exclusion = geospatial_mask_to_terrain_grid(
-            water_mask,
-            water_bounds,
-            latitudes,
-            longitudes,
-        )
-        detected_water_ratio = float(np.mean(water_exclusion[analysis_mask]))
-        water_exclusion = buffer_terrain_exclusion(
-            water_exclusion,
-            max(0.0, water_exclusion_buffer_m),
-            grid["cell_size_m"],
-        )
+        with span("water.exclusion_mask", buffer_m=float(water_exclusion_buffer_m)):
+            water_exclusion = geospatial_mask_to_terrain_grid(
+                water_mask,
+                water_bounds,
+                latitudes,
+                longitudes,
+            )
+            detected_water_ratio = float(np.mean(water_exclusion[analysis_mask]))
+            water_exclusion = buffer_terrain_exclusion(
+                water_exclusion,
+                max(0.0, water_exclusion_buffer_m),
+                grid["cell_size_m"],
+            )
+            set_attributes(detected_water_ratio=round(detected_water_ratio, 4),
+                           excluded_cells=int(water_exclusion.sum()))
 
     try:
         terrain = run_terrain_analysis(
